@@ -112,6 +112,21 @@ static constexpr __host__ __device__ int calc_nwarps(int ncols_dst,  mmvq_parame
             default:
                 return 1;
         }
+    } else {
+        switch (ncols_dst) {
+            case 1:
+                return 8;
+            case 2:
+            case 3:
+            case 4:
+                return 4;
+            case 5:
+            case 6:
+            case 7:
+            case 8:
+            default:
+                return 4;
+        }
     }
     return 1;
 }
@@ -131,6 +146,21 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
                 return 2;
             default:
                 return 1;
+        }
+    } else {
+        switch (ncols_dst) {
+            case 1:
+                return 4;
+            case 2:
+            case 3:
+            case 4:
+                return 2;
+            case 5:
+            case 6:
+            case 7:
+            case 8:
+            default:
+                return 4;
         }
     }
     return 1;
