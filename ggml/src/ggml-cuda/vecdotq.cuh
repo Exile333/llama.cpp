@@ -470,6 +470,8 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
         const int v0i = (v[0] >> (4*i)) & 0x0F0F0F0F;
         const int v1i = (v[1] >> (4*i)) & 0x0F0F0F0F;
 
+        //const int ui0 = u[2*i+0];
+        //const int ui1 = u[2*i+1];
         const int dot1 = ggml_cuda_dp4a(v1i, u[2*i+1], ggml_cuda_dp4a(v0i, u[2*i+0], 0)); // SIMD dot product
         const int dot2 = ggml_cuda_dp4a(0x01010101, u[2*i+1], ggml_cuda_dp4a(0x01010101, u[2*i+0], 0)); // sum of u
 
@@ -790,6 +792,17 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     // iqs = 12..15 -> bq8_offset = 6, want q4_offset = 96, 100, 104, 108
 
     const int * q4 = (const int *)(bq4_K->qs + 16 * bq8_offset + 4 * ((iqs/2)%4));
+    //*(uint64_t *)(&v) = *(const uint64_t *)(q4);
+    //global_load_b64 vdst, vaddr, saddr, ioffset, (m0) scope:SCOPE_SE \n
+    /*asm("\n \
+        global_load_b64 %0, %1, off, offset:0 \n \
+        s_wait_loadcnt 0x0 \n \
+        global_inv \n \
+        "
+        : "=v"(v)
+        : "v"(q4)
+    );
+    */
     v[0] = q4[0];
     v[1] = q4[4];
 

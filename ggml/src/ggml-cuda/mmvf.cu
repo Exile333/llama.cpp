@@ -3,6 +3,8 @@
 #include "convert.cuh"
 #include "mmvf.cuh"
 
+#include <iostream>
+
 template <typename T, typename type_acc, int ncols_dst, int block_size>
 static __global__ void mul_mat_vec_f(
         const T * __restrict__ x, const float * __restrict__ y, const int32_t * __restrict__ ids, float * __restrict__ dst,
@@ -179,6 +181,7 @@ static void launch_mul_mat_vec_f_cuda(
     const int nbytes_shared = warp_size*sizeof(float);
     const dim3 block_nums(nrows, nchannels_dst, nsamples_dst);
     const dim3 block_dims(block_size_best, 1, 1);
+    //std::cerr << "called" << std::endl;
     switch (block_size_best) {
         case   32: {
             mul_mat_vec_f<T, type_acc, ncols_dst,  32><<<block_nums, block_dims, nbytes_shared, stream>>>
