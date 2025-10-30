@@ -250,25 +250,23 @@ static __global__ void mul_mat_vec_q(
             }
         }
         __syncthreads();
-        if (threadIdx.y > 0) {
-            return;
-        }
+        if (threadIdx.y == 0) {
+            auto* dst_channel = dst + sample_dst*stride_sample_dst + channel_dst*stride_channel_dst + row0;
+            //dst += sample_dst*stride_sample_dst + channel_dst*stride_channel_dst + row0;
 
-        auto* dst_channel = dst + sample_dst*stride_sample_dst + channel_dst*stride_channel_dst + row0;
-        //dst += sample_dst*stride_sample_dst + channel_dst*stride_channel_dst + row0;
-
-        // sum up partial sums and write back result
+            // sum up partial sums and write back result
 #pragma unroll
-        for (int i = 0; i < rows_per_cuda_block; ++i) {
+            for (int i = 0; i < rows_per_cuda_block; ++i) {
 #pragma unroll
-            for (int l = 0; l < nwarps-1; ++l) {
-                tmp[i] += tmp_shared[l][i][threadIdx.x];
+                for (int l = 0; l < nwarps-1; ++l) {
+                    tmp[i] += tmp_shared[l][i][threadIdx.x];
+                }
+                tmp[i] = warp_reduce_sum<warp_size>(tmp[i]);
             }
-            tmp[i] = warp_reduce_sum<warp_size>(tmp[i]);
-        }
 
-        if (threadIdx.x < rows_per_cuda_block && (rows_per_cuda_block == 1 || uint32_t(row0 + threadIdx.x) < stride_col_dst)) {
-            dst_channel[col_j*stride_col_dst + threadIdx.x] = tmp[threadIdx.x];
+            if (threadIdx.x < rows_per_cuda_block && (rows_per_cuda_block == 1 || uint32_t(row0 + threadIdx.x) < stride_col_dst)) {
+                dst_channel[col_j*stride_col_dst + threadIdx.x] = tmp[threadIdx.x];
+            }
         }
     }
 }
