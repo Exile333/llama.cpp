@@ -4,6 +4,8 @@
 
 #include <cstdint>
 
+#define CEIL(a,b) ((a + b - 1) / b)
+
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
 
 static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) {
@@ -117,14 +119,15 @@ static constexpr __host__ __device__ int calc_nwarps(int ncols_dst,  mmvq_parame
             case 1:
                 return 8;
             case 2:
+                return 8;
             case 3:
             case 4:
-                return 16;
+                return 4;
             case 5:
             case 6:
             case 7:
             case 8:
-                return 16;
+                return 4;
             default:
                 return 1;
         }
@@ -153,14 +156,15 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
             case 1:
                 return 4;
             case 2:
+                return 4;
             case 3:
             case 4:
-                return 4;
+                return 8;
             case 5:
             case 6:
             case 7:
             case 8:
-                return 4;
+                return 8;
             default:
                 return 1;
         }
@@ -188,8 +192,9 @@ static __global__ void mul_mat_vec_q(
 
     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
 
+    const     int col_j = blockIdx.x % ncols_dst;
     const     int tid = warp_size*threadIdx.y + threadIdx.x;
-    const     int row0 = rows_per_cuda_block*blockIdx.x;
+    const     int row0 = rows_per_cuda_block*(blockIdx.x / ncols_dst);
     const     int blocks_per_row_x = ncols_x / qk;
     constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
 
@@ -204,30 +209,27 @@ static __global__ void mul_mat_vec_q(
     const block_q8_1 * y = ((const block_q8_1 *) vy) + sample_y*stride_sample_y + channel_y*stride_channel_y;
     const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row0*stride_row_x;
 
-    float tmp_local[ncols_dst][rows_per_cuda_block] = {{0.0f}};
-    __shared__ float tmp_shared[ncols_dst][rows_per_cuda_block][nwarps];
-#pragma unroll
-    for (int col_j = 0; col_j < ncols_dst; ++col_j) {
-        // partial sum for each thread
-        for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
-            const int kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
+    float tmp_local[rows_per_cuda_block] = {0.0f};
+    __shared__ float tmp_shared[rows_per_cuda_block][nwarps];
+    // partial sum for each thread
+    for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+        const int kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
 
-            // x block quant index when casting the quants to int
-            const int kqs = vdr * (tid % (qi/vdr));
-
-#pragma unroll
-            for (int i = 0; i < rows_per_cuda_block; ++i) {
-                tmp_local[col_j][i] += vec_dot_q_cuda(
-                    vx, &y[col_j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
-            }
-        }
+        // x block quant index when casting the quants to int
+        const int kqs = vdr * (tid % (qi/vdr));
 
 #pragma unroll
         for (int i = 0; i < rows_per_cuda_block; ++i) {
-            float warp_dotproduct = warp_reduce_sum<warp_size>(tmp_local[col_j][i]);
-            if (threadIdx.x == 0) {
-                tmp_shared[col_j][i][threadIdx.y] = warp_dotproduct;
-            }
+            tmp_local[i] += vec_dot_q_cuda(
+                vx, &y[col_j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < rows_per_cuda_block; ++i) {
+        float warp_dotproduct = warp_reduce_sum<warp_size>(tmp_local[i]);
+        if (threadIdx.x == 0) {
+            tmp_shared[i][threadIdx.y] = warp_dotproduct;
         }
     }
 
@@ -236,23 +238,20 @@ static __global__ void mul_mat_vec_q(
     }
 
 #pragma unroll
-    for (int col_j = 0; col_j < ncols_dst; ++col_j) {
-#pragma unroll
-        for (int i = 0; i < rows_per_cuda_block; ++i) {
-            tmp_local[col_j][i] = warp_reduce_sum<warp_size>(threadIdx.x < nwarps ? tmp_shared[col_j][i][threadIdx.x] : 0.0f);
+    for (int i = 0; i < rows_per_cuda_block; ++i) {
+        tmp_local[i] = warp_reduce_sum<warp_size>(threadIdx.x < nwarps ? tmp_shared[i][threadIdx.x] : 0.0f);
+    }
 
-            if (threadIdx.x == 0) {
-                auto* dst_channel = dst + sample_dst*stride_sample_dst + channel_dst*stride_channel_dst + row0;
-                dst_channel[col_j*stride_col_dst + i] = tmp_local[col_j][i];
-            }
-        }
+    if (threadIdx.x < rows_per_cuda_block && (rows_per_cuda_block == 1 || uint32_t(row0 + threadIdx.x) < stride_col_dst)) {
+        auto* dst_channel = dst + sample_dst*stride_sample_dst + channel_dst*stride_channel_dst + row0;
+        dst_channel[col_j*stride_col_dst + threadIdx.x] = tmp_local[threadIdx.x];
     }
 }
 
 static std::pair<dim3, dim3> calc_launch_params(
         const int ncols_dst, const int nrows_x, const int nchannels_y, const int nsamples_y,
         const int warp_size, const mmvq_parameter_table_id table_id) {
-    const int64_t nblocks = (nrows_x + calc_rows_per_block(ncols_dst, table_id) - 1) / calc_rows_per_block(ncols_dst, table_id);
+    const int64_t nblocks = CEIL(nrows_x, calc_rows_per_block(ncols_dst, table_id)) * ncols_dst;
     const dim3 block_nums(nblocks, nchannels_y, nsamples_y);
     const dim3 block_dims(warp_size, calc_nwarps(ncols_dst, table_id), 1);
     return {block_nums, block_dims};
