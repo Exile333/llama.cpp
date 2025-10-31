@@ -117,9 +117,9 @@ static constexpr __host__ __device__ int calc_nwarps(int ncols_dst,  mmvq_parame
     } else {
         switch (ncols_dst) {
             case 1:
-                return 8;
+                return 4;
             case 2:
-                return 8;
+                return 4;
             case 3:
             case 4:
                 return 4;
@@ -154,9 +154,9 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
     } else {
         switch (ncols_dst) {
             case 1:
-                return 4;
+                return 2;
             case 2:
-                return 4;
+                return 8;
             case 3:
             case 4:
                 return 8;
@@ -211,17 +211,35 @@ static __global__ void mul_mat_vec_q(
 
     float tmp_local[rows_per_cuda_block] = {0.0f};
     __shared__ float tmp_shared[rows_per_cuda_block][nwarps];
+
+    /*
+    constexpr uint32_t column_buf_size = 1024;
+    __shared__ block_q8_1 column[column_buf_size];
+    for (int idx = tid, lim = stride_col_y; idx < lim; idx += blockDim.x * blockDim.y) {
+        column[idx] = ((const block_q8_1 *) vy)[sample_y*stride_sample_y + channel_y*stride_channel_y + col_j*stride_col_y + idx];
+    } 
+    */
     // partial sum for each thread
+    //constexpr uint32_t block_q8_cnt = 256;
     for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
         const int kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
 
         // x block quant index when casting the quants to int
         const int kqs = vdr * (tid % (qi/vdr));
 
+        /*
+        __shared__ block_q8_1 y_block[block_q8_cnt];
+        for (int idx = tid; idx < block_q8_cnt; idx += blockDim.x * blockDim.y) {
+            y_block[idx] = ((const block_q8_1 *) vy)[sample_y*stride_sample_y + channel_y*stride_channel_y + col_j*stride_col_y + kby + idx];
+        } 
+        __syncthreads();
+        */
 #pragma unroll
         for (int i = 0; i < rows_per_cuda_block; ++i) {
             tmp_local[i] += vec_dot_q_cuda(
                 vx, &y[col_j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                //vx, column + kby, kbx_offset + i*stride_row_x + kbx, kqs);
+                //vx, y_block, kbx_offset + i*stride_row_x + kbx, kqs);
         }
     }
 
@@ -232,6 +250,7 @@ static __global__ void mul_mat_vec_q(
             tmp_shared[i][threadIdx.y] = warp_dotproduct;
         }
     }
+    __syncthreads();
 
     if (threadIdx.y > 0) {
         return;
