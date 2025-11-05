@@ -772,6 +772,175 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1(
     return vec_dot_q3_K_q8_1_impl_mmvq(vl, vh, u, bq3_K->scales, scale_offset, d, d8);
 }
 
+/*
+template <int nbytes>
+struct next_best_datatype {
+    static_assert(nbytes < 8, "No specialization provided for datatypes of size 8 and greater.");
+    using type = void;
+};
+
+template <> struct next_best_datatype<7> {
+    using type = uint32_t;
+};
+
+template <> struct next_best_datatype<6> {
+    using type = uint32_t;
+};
+
+template <> struct next_best_datatype<5> {
+    using type = uint32_t;
+};
+
+template <> struct next_best_datatype<4> {
+    using type = uint32_t;
+};
+
+template <> struct next_best_datatype<3> {
+    using type = uint16_t;
+};
+
+template <> struct next_best_datatype<2> {
+    using type = uint16_t;
+};
+
+template <> struct next_best_datatype<1> {
+    using type = uint8_t;
+};
+
+// nbytes == n bytes to read. In other words, how many bytes one should read to get to to address aligned by 64 bits.
+template <int nbytes>
+static __device__ __forceinline__ void fast_read_unaligned64(uint8_t * __restrict__ out, const uint8_t * __restrict__ in) {
+    static_assert(nbytes < 8, "Unaligned bytes count can't be >= 8 for 64-bit datatypes.");
+
+    // It is easier to do via ifs, so whatever.
+    if constexpr (nbytes == 7) {
+        // Let's look closer at this branch.
+        // 7 bytes until aligned address means that we are 1 byte past.
+        // Which effectively means thet we need to read first byte in one request, then 2 bytes, and then 4.
+        out[0] = in[0];
+        ((uint16_t*)(out + 1))[0] = ((uint16_t*)(in + 1))[0];
+        ((uint32_t*)(out + 3))[0] = ((uint32_t*)(in + 3))[0];
+    } else if constexpr (nbytes == 6) {
+        ((uint16_t*)out)[0] = ((uint16_t*)in)[0];
+        ((uint32_t*)(out + 2))[0] = ((uint32_t*)(in + 2))[0];
+    } else if constexpr (nbytes == 5) {
+        out[0] = in[0];
+        ((uint32_t*)(out + 1))[0] = ((uint32_t*)(in + 1))[0];
+    } else if constexpr (nbytes == 4) {
+        ((uint32_t*)out)[0] = ((uint32_t*)in)[0];
+    } else if constexpr (nbytes == 3) {
+        out[0] = in[0];
+        ((uint16_t*)(out + 1))[0] = ((uint16_t*)(in + 1))[0];
+    } else if constexpr (nbytes == 2) {
+        ((uint16_t*)out)[0] = ((uint16_t*)in)[0];
+    } else if constexpr (nbytes == 1) {
+        out[0] = in[0];
+    }
+}
+
+// TODO If it works, move to common.cuh or some util file.
+template <typename out_type, int nbytes, int bytes_unaligned>
+static __device__ void fast_load(out_type * __restrict__ out, const uint8_t * __restrict__ in) {
+    constexpr const int type_size = sizeof(out_type);
+
+    static_assert(bytes_unaligned < 8, "No specialization for bytes unaligned >= 8");
+    static_assert(!(type_size & (type_size - 1)), "We only support types which size is some power of 2.");
+
+    if constexpr (bytes_unaligned == 0) {
+        constexpr const int n_elems = nbytes / type_size;
+
+#pragma unroll
+        for (int i = 0; i < n_elems; ++i) {
+            out[i] = ((const out_type*) in)[i];
+        }
+        if constexpr (constexpr const int nbytes_leftover = nbytes % type_size; nbytes_leftover > 0) {
+            using smaller_datatype = typename next_best_datatype<nbytes_leftover>::type;
+            fast_load<smaller_datatype, nbytes_leftover, 0>((smaller_datatype *) (out + n_elems), in + n_elems * type_size);
+        }
+    } else {
+        constexpr int first_nbytes_to_read = std::min(bytes_unaligned, nbytes);
+        fast_read_unaligned64<first_nbytes_to_read>((uint8_t *) out, in);
+        if constexpr (nbytes > first_nbytes_to_read) {
+            fast_load<out_type, nbytes - first_nbytes_to_read, 0>((out_type*)(((uint8_t *) out) + first_nbytes_to_read), in + first_nbytes_to_read);
+        }
+    }
+}
+*/
+
+static __device__ __forceinline__ void fast_load(uint64_t * __restrict__ out, const uint8_t * __restrict__ in, int nbytes) {
+    constexpr const int type_size = sizeof(out[0]);
+    int addr_misalignment = (8 - ((uintptr_t) in) % type_size) % 8;
+    int bytes_to_write = std::min(addr_misalignment, nbytes);
+
+    while (bytes_to_write > 0) {
+        if (bytes_to_write == 1) {
+            using smaller_datatype = uint8_t;
+            ((smaller_datatype *) out)[0] = ((const smaller_datatype *) in)[0];
+            out = (uint64_t *) ((smaller_datatype * ) out + 1);
+            in = (const uint8_t *) ((const smaller_datatype * ) in + 1);
+            bytes_to_write -= 1;
+            nbytes -= 1;
+        } else if (bytes_to_write < 4) {
+            using smaller_datatype = uint16_t;
+            ((smaller_datatype *) out)[0] = ((const smaller_datatype *) in)[0];
+            out = (uint64_t *) ((smaller_datatype * ) out + 1);
+            in = (const uint8_t *) ((const smaller_datatype * ) in + 1);
+            bytes_to_write -= 2;
+            nbytes -= 2;
+        } else if (bytes_to_write < 8) {
+            using smaller_datatype = uint32_t;
+            ((smaller_datatype *) out)[0] = ((const smaller_datatype *) in)[0];
+            out = (uint64_t *) ((smaller_datatype * ) out + 1);
+            in = (const uint8_t *) ((const smaller_datatype * ) in + 1);
+            bytes_to_write -= 4;
+            nbytes -= 4;
+        } else {
+            assert(0);
+        }
+    }
+
+    if (nbytes == 0) {
+        return;
+    }
+
+    for (int i = 0, n_elems = nbytes / type_size; i < n_elems; ++i) {
+        out[0] = ((const uint64_t*) in)[0];
+        in += type_size;
+        ++out;
+    }
+
+    bytes_to_write = nbytes % type_size;
+    while (bytes_to_write > 0) {
+        if (bytes_to_write == 1) {
+            using smaller_datatype = uint8_t;
+            ((smaller_datatype *) out)[0] = ((const smaller_datatype *) in)[0];
+            out = (uint64_t *) ((smaller_datatype * ) out + 1);
+            in = (const uint8_t *) ((const smaller_datatype * ) in + 1);
+            bytes_to_write -= 1;
+        } else if (bytes_to_write < 4) {
+            using smaller_datatype = uint16_t;
+            ((smaller_datatype *) out)[0] = ((const smaller_datatype *) in)[0];
+            out = (uint64_t *) ((smaller_datatype * ) out + 1);
+            in = (const uint8_t *) ((const smaller_datatype * ) in + 1);
+            bytes_to_write -= 2;
+        } else if (bytes_to_write < 8) {
+            using smaller_datatype = uint32_t;
+            ((smaller_datatype *) out)[0] = ((const smaller_datatype *) in)[0];
+            out = (uint64_t *) ((smaller_datatype * ) out + 1);
+            in = (const uint8_t *) ((const smaller_datatype * ) in + 1);
+            bytes_to_write -= 4;
+        } else {
+            assert(0);
+        }
+    }
+}
+
+/*
+template <int nbytes>
+static __device__ __forceinline__ void fast_load64(uint64_t * __restrict__ out, const uint8_t * __restrict__ in) {
+}
+*/
+
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
@@ -793,7 +962,87 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     v[0] = q4[0];
     v[1] = q4[4];
 
-    const uint16_t * scales = (const uint16_t *)bq4_K->scales;
+    //const uint16_t * scales = (const uint16_t *)bq4_K->scales;
+    constexpr int scales_size = 6;
+    uint16_t scales[scales_size];
+#pragma unroll
+    for (int i = 0; i < scales_size; ++i) {
+        ((uint16_t*)scales)[i] = ((const uint16_t *)bq4_K->scales)[i];
+    }
+    //fast_load((uint64_t*) scales, bq4_K->scales, 12);
+    /*
+#pragma unroll
+    for (int i = 0; i < 3; ++i) {
+        ((uint32_t*) scales)[i] = ((const uint32_t *) bq4_K->scales)[i];
+    }
+    */
+    /*
+    const int addr_misalignment = ((uintptr_t) bq4_K->scales) % sizeof(uint64_t);
+    if (addr_misalignment == 2) {
+        ((uint16_t*)scales)[0] = ((const uint16_t*) bq4_K->scales)[0];
+        ((uint64_t*)(scales + 1))[0] = ((const uint64_t*) (bq4_K->scales + 1))[0];
+        ((uint16_t*)scales)[5] = ((const uint16_t*) bq4_K->scales)[5];
+    } else if (addr_misalignment == 0) {
+        ((uint64_t*)scales)[0] = ((const uint64_t*) bq4_K->scales)[0];
+        ((uint32_t*)scales)[2] = ((const uint32_t*) bq4_K->scales)[2];
+    } else {
+        assert(false);
+    }
+    */
+    /*
+    ((uint32_t*)scales)[0] = ((const uint32_t*) bq4_K->scales)[0];
+    ((uint32_t*)scales)[1] = ((const uint32_t*) bq4_K->scales)[1];
+    ((uint32_t*)scales)[2] = ((const uint32_t*) bq4_K->scales)[2];
+    */
+    /*
+    {
+        const int addr_misalignment = (sizeof(uint64_t) - ((uintptr_t) bq4_K->scales) % sizeof(uint64_t)) % sizeof(uint64_t);
+        //const int addr_misalignment = ((uintptr_t) bq4_K->scales) % sizeof(uint64_t);
+        switch (addr_misalignment) {
+            case 0: {
+                fast_load<uint64_t, 12, 0>((uint64_t*) scales, bq4_K->scales);
+            } break;
+            case 1: {
+                fast_load<uint64_t, 12, 1>((uint64_t*) scales, bq4_K->scales);
+            } break;
+            case 2: {
+                fast_load<uint64_t, 12, 2>((uint64_t*) scales, bq4_K->scales);
+            } break;
+            case 3: {
+                fast_load<uint64_t, 12, 3>((uint64_t*) scales, bq4_K->scales);
+            } break;
+            case 4: {
+                fast_load<uint64_t, 12, 4>((uint64_t*) scales, bq4_K->scales);
+            } break;
+            case 5: {
+                fast_load<uint64_t, 12, 5>((uint64_t*) scales, bq4_K->scales);
+            } break;
+            case 6: {
+                fast_load<uint64_t, 12, 6>((uint64_t*) scales, bq4_K->scales);
+            } break;
+            case 7: {
+                fast_load<uint64_t, 12, 7>((uint64_t*) scales, bq4_K->scales);
+            } break;
+            default: {
+                assert(false);
+            } break;
+        }
+    }
+    */
+    /*
+    if (((uintptr_t) bq4_K->scales) % 4 == 0) {
+        ((uint32_t*) scales)[0] = ((const uint32_t *) bq4_K->scales)[0];
+        ((uint32_t*) scales)[1] = ((const uint32_t *) bq4_K->scales)[1];
+        ((uint32_t*) scales)[2] = ((const uint32_t *) bq4_K->scales)[2];
+    } else {
+        ((uint16_t*) scales)[0] = ((const uint16_t *) bq4_K->scales)[0];
+        ((uint16_t*) scales)[5] = ((const uint16_t *) bq4_K->scales)[5];
+        uint32_t* scales_shifted = (uint32_t*) (scales + 1);
+        const uint32_t* raw_scales_shifted = (const uint32_t *) (bq4_K->scales + 2);
+        scales_shifted[0] = raw_scales_shifted[0];
+        scales_shifted[1] = raw_scales_shifted[1];
+    }
+    */
     uint16_t aux[2];
     const int j = bq8_offset/2;
     if (j < 2) {
