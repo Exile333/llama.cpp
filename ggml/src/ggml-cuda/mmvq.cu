@@ -211,10 +211,11 @@ static __global__ void mul_mat_vec_q(
     static_assert(nwarps * warp_size >= rows_per_iter, "Can't write results to output with such configuration.");
     int row0 = rows_per_cuda_block*(blockIdx.x / ncols_dst);
 
-    for (int rows_processed = 0; rows_processed < rows_per_cuda_block; rows_processed += rows_per_iter, row0 += rows_per_iter) {
+    __shared__ float tmp_shared[2][rows_per_iter][nwarps];
+    int shared_buf_idx = 0;
+    for (int rows_processed = 0; rows_processed < rows_per_cuda_block; rows_processed += rows_per_iter, row0 += rows_per_iter, shared_buf_idx = (shared_buf_idx + 1) % 2) {
         // partial sum for each thread
         float tmp_local[rows_per_iter] = {0.0f};
-        __shared__ float tmp_shared[rows_per_iter][nwarps];
 
         const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row0*stride_row_x;
         for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
@@ -240,7 +241,7 @@ static __global__ void mul_mat_vec_q(
             }
             float warp_dotproduct = warp_reduce_sum<warp_size>(tmp_local[i]);
             if (threadIdx.x == 0) {
-                tmp_shared[i][threadIdx.y] = warp_dotproduct;
+                tmp_shared[shared_buf_idx][i][threadIdx.y] = warp_dotproduct;
             }
         }
         __syncthreads();
@@ -250,7 +251,7 @@ static __global__ void mul_mat_vec_q(
                 if (rows_processed + i >= rows_per_cuda_block) {
                     break;
                 }
-                tmp_local[i] = warp_reduce_sum<warp_size>(threadIdx.x < nwarps ? tmp_shared[i][threadIdx.x] : 0.0f);
+                tmp_local[i] = warp_reduce_sum<warp_size>(threadIdx.x < nwarps ? tmp_shared[shared_buf_idx][i][threadIdx.x] : 0.0f);
             }
 
             if (threadIdx.x < rows_per_iter && (rows_processed + threadIdx.x) < rows_per_cuda_block) {
