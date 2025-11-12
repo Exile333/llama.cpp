@@ -193,7 +193,7 @@ static __global__ void mul_mat_vec_q(
 
     const     int col_j = blockIdx.x % ncols_dst;
     // gridDim.x = nblocks = std::min(ncols_dst * nrows_x, 64*4)
-    const     int rows_per_cuda_block = CEIL(gridDim.x / ncols_dst, stride_col_dst);
+    const     int rows_per_cuda_block = CEIL(stride_col_dst, CEIL(gridDim.x, ncols_dst));
     const     int tid = warp_size*threadIdx.y + threadIdx.x;
     const     int blocks_per_row_x = ncols_x / qk;
     constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
