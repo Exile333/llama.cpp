@@ -2,6 +2,9 @@
 
 #include "common.cuh"
 
+// NOTE Requires rocm 7.0+
+#include <rocwmma/rocwmma.hpp>
+
 #include <cstdint>
 
 static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32) {
@@ -457,6 +460,8 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1_impl_mmq(
 #define VDR_Q4_K_Q8_1_MMVQ 2
 #define VDR_Q4_K_Q8_1_MMQ  8
 
+//typedef _Uint8 uint8_16 __attribute__((ext_vector_type(16)));
+
 // contiguous v/x values
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
     const int * __restrict__ v, const int * __restrict__ u, const uint8_t * __restrict__ sc,
@@ -465,6 +470,44 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
     float sumf_d = 0.0f;
     float sumf_m = 0.0f;
 
+    /*
+    // TODO infer m from somewhere.
+    constexpr int m = 1;
+    // TODO infer n from somewhere when we learn to process n > 1. Or leave support only for n = 1.
+    constexpr int n = 1;
+    constexpr int k = 8;
+    auto fragA = rocwmma::fragment<matrix_a, m, n, k, rocwmma::uint8_t, row_major>();
+    auto fragB = rocwmma::fragment<matrix_a, m, n, k, rocwmma::uint8_t, col_major>();
+    auto fragC = rocwmma::fragment<matrix_a, m, n, k, rocwmma::uint8_t, col_major>();
+    auto fragAcc = rocwmma::fragment<matrix_a, m, n, k, rocwmma::uint8_t, row_major>();
+    rocwmma::fill_fragment(fragAcc, 0.0f);
+
+#pragma unroll
+    for (int i = 0; i < QR4_K; ++i) {
+        int vi[2];
+        const int vi[0] = (v[0] >> (4*i)) & 0x0F0F0F0F;
+        const int vi[1] = (v[1] >> (4*i)) & 0x0F0F0F0F;
+        rocwmma::load_matrix_sync(fragA, vi, );
+    }
+    */
+    // TODO put more rows.
+    const int lane = threadIdx.x % 16;
+    uint8_t fragA[16] = {0};
+    uint8_t fragB[16] = {0};
+    uint8_t fragBConst[16] = {0};
+    uint8_t fragAcc[16] = {0};
+    // TODO Actually we can put here twice as more stuff.
+#pragma unroll
+    for (int i = 0; i < QR4_K; ++i) {
+#pragma unroll
+        for (int ele = 0; ele < 2; ++i) {
+            ((int*)fragA)[ele] = (v[ele] >> (4*i)) & 0x0F0F0F0F;
+            ((int*)fragB)[ele] = u[2*i + ele];
+        }
+    }
+
+
+/*
 #pragma unroll
     for (int i = 0; i < QR4_K; ++i) {
         const int v0i = (v[0] >> (4*i)) & 0x0F0F0F0F;
@@ -476,6 +519,7 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
         sumf_d += d8[i] * (dot1 * sc[i]);
         sumf_m += d8[i] * (dot2 * m[i]);  // multiply constant part of q4_K with sum of q8_1 values
     }
+    */
 
     const float2 dm4f = __half22float2(dm4);
 

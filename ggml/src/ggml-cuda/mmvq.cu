@@ -4,6 +4,12 @@
 
 #include <cstdint>
 
+// TODO This are defines for RDNA3/4. Provide ones for CDNA if it works.
+#define AMD_WMMA_M 16
+#define AMD_WMMA_N 16
+#define AMD_WMMA_K 16
+// NOTE C mtx is 0 for MMVQ kernels.
+
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
 
 static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) {
@@ -156,10 +162,11 @@ static __global__ void mul_mat_vec_q(
 
     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
 
-    const     int tid = warp_size*threadIdx.y + threadIdx.x;
-    const     int row0 = rows_per_cuda_block*blockIdx.x;
-    const     int blocks_per_row_x = ncols_x / qk;
-    constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
+    const     const int tid = warp_size*threadIdx.y + threadIdx.x;
+    const     const int row0 = rows_per_cuda_block*blockIdx.x;
+    const     const int blocks_per_row_x = ncols_x / qk;
+    constexpr const int blocks_per_iter = nwarps;
+    //constexpr const int blocks_per_iter = vdr * nwarps*warp_size / qi;
 
     // The MUL_MAT_ID code path with ids != nullptr is only implemented for ncols_dst == 1.
     const uint32_t channel_dst = blockIdx.y;
@@ -169,27 +176,63 @@ static __global__ void mul_mat_vec_q(
     const uint32_t sample_x    = fastdiv(sample_dst, sample_ratio);
     const uint32_t sample_y    = sample_dst;
 
+    // Fragments for ui8_ui8_ui32 WMMA instructions.
+    uint8_t frag_a[AMD_WMMA_K] = {0};
+    uint8_t frag_b[AMD_WMMA_K] = {0};
+    uint8_t frag_acc[AMD_WMMA_M] = {0};
+    static_assert(QK8_1 % AMD_WMMA_K == 0, "Bad alignment for WMMA instructions.");
+    static_assert(qk % AMD_WMMA_K == 0, "Bad alignment for WMMA instructions.");
+    static_assert(QK8_1 % qk == 0, "Bad alignment for VMMQ op.");
+    constexpr const int wmma_iter_n = QK8_1 / AMD_WMMA_K; 
+    /*
+#define QK8_1 32
+    typedef struct {
+        GGML_EXTENSION union {
+            struct {
+                ggml_half d; // delta
+                ggml_half s; // d * sum(qs[i])
+            } GGML_COMMON_AGGR_S;
+            ggml_half2 ds;
+        } GGML_COMMON_AGGR_U;
+        int8_t qs[QK8_1]; // quants
+    } block_q8_1;
+    */
+
+    uint8_t a_buf[rows_per_cuda_block][qk] = {{0}};
+    uint8_t b_buf[ncols_dst][QK8_1] = {{0}};
+
     // partial sum for each thread
     float tmp[ncols_dst][rows_per_cuda_block] = {{0.0f}};
 
     const block_q8_1 * y = ((const block_q8_1 *) vy) + sample_y*stride_sample_y + channel_y*stride_channel_y;
     const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row0*stride_row_x;
 
-    for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+    //for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+    for (int kbx = threadIdx.y; kbx < blocks_per_row_x; kbx += blocks_per_iter) {
         const int kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
 
         // x block quant index when casting the quants to int
         const int kqs = vdr * (tid % (qi/vdr));
 
 #pragma unroll
-        for (int j = 0; j < ncols_dst; ++j) {
+        for (int i = 0; i < rows_per_cuda_block; ++i) {
+            // TODO dequantization
+            dequantize_block(&a_buf[i], vx, kbx_offset + i*stride_row_x + kbx);
 #pragma unroll
-            for (int i = 0; i < rows_per_cuda_block; ++i) {
-                tmp[j][i] += vec_dot_q_cuda(
-                    vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+            for (int j = 0; j < ncols_dst; ++j) {
+                dequantize_block_q8_1(&b_buf[j], vy, sample_y*stride_sample_y + channel_y*stride_channel_y + j*stride_col_y + kby);
+#pragma unroll
+                for (int wmma_iter_i = 0; wmma_iter_i < wmma_iter_n; ++wmma_iter_i) {
+                    // TODO wmma ops
+                }
+                // TODO normalize by coefficients 
+                //tmp[j][i] += vec_dot_q_cuda(
+                //    vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
             }
         }
     }
+
+    // TODO write results
 
     __shared__ float tmp_shared[nwarps-1 > 0 ? nwarps-1 : 1][ncols_dst][rows_per_cuda_block][warp_size];
     if (threadIdx.y > 0) {
