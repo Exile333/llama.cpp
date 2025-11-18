@@ -457,24 +457,45 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1_impl_mmq(
 #define VDR_Q4_K_Q8_1_MMVQ 2
 #define VDR_Q4_K_Q8_1_MMQ  8
 
+typedef int int2v __attribute__((ext_vector_type(2)));
+typedef int int8v __attribute__((ext_vector_type(8)));
+
+// WMMA: assume that data each half of the wave processes the same data.
+// WMMA: only half of lanes will have usable results.
+// WMMA: see following link for details: https://gpuopen.com/learn/wmma_on_rdna3
 // contiguous v/x values
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
     const int * __restrict__ v, const int * __restrict__ u, const uint8_t * __restrict__ sc,
     const uint8_t * __restrict__ m, const half2 & dm4, const float * __restrict__ d8) {
+    const int lane_idx = threadIdx.x % 16;
+    const int group_idx = threadIdx.x / 16;
+    const bool has_wmma_result = (group_idx == 0 && lane_idx % 2 == 0) || (group_idx == 1 && lane_idx % 2 == 1);
 
     float sumf_d = 0.0f;
     float sumf_m = 0.0f;
 
+    int2v a_frag = {0};
+    int2v b_frag = {0};
+
 #pragma unroll
     for (int i = 0; i < QR4_K; ++i) {
-        const int v0i = (v[0] >> (4*i)) & 0x0F0F0F0F;
-        const int v1i = (v[1] >> (4*i)) & 0x0F0F0F0F;
+        int8v acc_frag = {0};
 
-        const int dot1 = ggml_cuda_dp4a(v1i, u[2*i+1], ggml_cuda_dp4a(v0i, u[2*i+0], 0)); // SIMD dot product
-        const int dot2 = ggml_cuda_dp4a(0x01010101, u[2*i+1], ggml_cuda_dp4a(0x01010101, u[2*i+0], 0)); // sum of u
+        a_frag[0] = (v[0] >> (4*i)) & 0x0F0F0F0F;
+        a_frag[1] = (v[1] >> (4*i)) & 0x0F0F0F0F;
 
-        sumf_d += d8[i] * (dot1 * sc[i]);
-        sumf_m += d8[i] * (dot2 * m[i]);  // multiply constant part of q4_K with sum of q8_1 values
+        b_frag[0] = u[2*i+0];
+        b_frag[1] = u[2*i+1];
+
+        acc_frag = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(true, a_frag, true, b_frag, acc_frag, false);
+
+        if (has_wmma_result) {
+            int dot1 = acc_frag[lane_idx / 2];
+            const int dot2 = ggml_cuda_dp4a(0x01010101, u[2*i+1], ggml_cuda_dp4a(0x01010101, u[2*i+0], 0)); // sum of u
+
+            sumf_d += d8[i] * (dot1 * sc[i]);
+            sumf_m += d8[i] * (dot2 * m[i]);  // multiply constant part of q4_K with sum of q8_1 values
+        }
     }
 
     const float2 dm4f = __half22float2(dm4);

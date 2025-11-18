@@ -153,13 +153,20 @@ static __global__ void mul_mat_vec_q(
     constexpr int nwarps = calc_nwarps(ncols_dst, table_id);
     constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id);
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+    constexpr int half_warp_size = ggml_cuda_get_physical_warp_size() / 2;
+    constexpr int blocks_per_warp = warp_size / (qi/vdr);
+    static_assert(blocks_per_warp > 0);
 
     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
 
+    const     int group_idx = threadIdx.x / half_warp_size;
+    const     int lane_idx = threadIdx.x % half_warp_size;
+    const     int warp_idx = threadIdx.y;
     const     int tid = warp_size*threadIdx.y + threadIdx.x;
     const     int row0 = rows_per_cuda_block*blockIdx.x;
     const     int blocks_per_row_x = ncols_x / qk;
     constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
+    constexpr int blocks_per_iter_per_warp = vdr * warp_size / qi;
 
     // The MUL_MAT_ID code path with ids != nullptr is only implemented for ncols_dst == 1.
     const uint32_t channel_dst = blockIdx.y;
@@ -175,18 +182,26 @@ static __global__ void mul_mat_vec_q(
     const block_q8_1 * y = ((const block_q8_1 *) vy) + sample_y*stride_sample_y + channel_y*stride_channel_y;
     const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row0*stride_row_x;
 
-    for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
-        const int kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
+    //for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+    for (int kbx = blocks_per_iter * warp_idx; kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+        // Since WMMA instructions can only calculate blocks of size 16x16x16 (wave32 mode)
+        // and can be run only warp wise, we want each warp to process its portion in halves.
 
-        // x block quant index when casting the quants to int
-        const int kqs = vdr * (tid % (qi/vdr));
+        // Whatever. It works for q4_k quantization. Maybe i'll fix it later for other quants if this one works.
+#pragma unroll
+        for (int block_i = 0; block_i < blocks_per_iter_per_warp; ++block_i) {
+            const int kby = (kbx + block_i) * (qk/QK8_1); // y block index that aligns with kbx
+
+            // x block quant index when casting the quants to int
+            const int kqs = vdr * (tid % (qi/vdr));
 
 #pragma unroll
-        for (int j = 0; j < ncols_dst; ++j) {
+            for (int j = 0; j < ncols_dst; ++j) {
 #pragma unroll
-            for (int i = 0; i < rows_per_cuda_block; ++i) {
-                tmp[j][i] += vec_dot_q_cuda(
-                    vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                for (int i = 0; i < rows_per_cuda_block; ++i) {
+                    tmp[j][i] += vec_dot_q_cuda(
+                        vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                }
             }
         }
     }
