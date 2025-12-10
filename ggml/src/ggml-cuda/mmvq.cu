@@ -2,6 +2,8 @@
 #include "quantize.cuh"
 #include "vecdotq.cuh"
 
+#include <hip/hip_cooperative_groups.h>
+
 #include <cstdint>
 
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
@@ -113,7 +115,7 @@ static constexpr __host__ __device__ int calc_nwarps(int ncols_dst,  mmvq_parame
                 return 1;
         }
     }
-    return 1;
+    return 8;
 }
 
 static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int table_id) {
@@ -138,7 +140,7 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
 
 template <ggml_type type, int ncols_dst>
 // tell the compiler to use as many registers as it wants, see nwarps definition below
-__launch_bounds__(calc_nwarps(ncols_dst, get_device_table_id())*ggml_cuda_get_physical_warp_size(), 1)
+__launch_bounds__(2*calc_nwarps(ncols_dst, get_device_table_id())*ggml_cuda_get_physical_warp_size(), 1)
 static __global__ void mul_mat_vec_q(
         const void * __restrict__ vx, const void * __restrict__ vy, const int32_t * __restrict__ ids, float * __restrict__ dst,
         const uint32_t ncols_x, const uint3 nchannels_y, const uint32_t stride_row_x, const uint32_t stride_col_y,
@@ -150,13 +152,13 @@ static __global__ void mul_mat_vec_q(
     constexpr int qi  = ggml_cuda_type_traits<type>::qi;
     constexpr int vdr = get_vdr_mmvq(type);
     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
-    constexpr int nwarps = calc_nwarps(ncols_dst, table_id);
+    constexpr int nwarps = 2*calc_nwarps(ncols_dst, table_id);
     constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id);
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 
     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
 
-    const     int tid = warp_size*threadIdx.y + threadIdx.x;
+    //const     int tid = warp_size*threadIdx.y + threadIdx.x;
     const     int row0 = rows_per_cuda_block*blockIdx.x;
     const     int blocks_per_row_x = ncols_x / qk;
     constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
@@ -175,18 +177,74 @@ static __global__ void mul_mat_vec_q(
     const block_q8_1 * y = ((const block_q8_1 *) vy) + sample_y*stride_sample_y + channel_y*stride_channel_y;
     const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row0*stride_row_x;
 
-    for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
-        const int kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
+    {
+        int group_a_start_idx = warp_size*2*threadIdx.y + threadIdx.x;
+        //cooperative_groups::thread_block_tile<2*warp_size, cooperative_groups::thread_block> two_waves(cooperative_groups::this_thread_block());
+        auto two_waves = cooperative_groups::tiled_partition<2*warp_size>(cooperative_groups::this_thread_block());
+        const int wave_id = two_waves.thread_rank() / warp_size;
+        //int kbx = tid / (qi/vdr);
+        int tid = group_a_start_idx + wave_id*warp_size + threadIdx.x;
+        int kbx = tid / (qi/vdr);
+        int kby = kbx * (qk/QK8_1);
 
-        // x block quant index when casting the quants to int
-        const int kqs = vdr * (tid % (qi/vdr));
+        // TODO make enough space for all types?
+        //uint8_t x_preloaded[*sizeof(block_q4_K)];
+        block_q4_K x_preloaded;
+        block_q8_1 y_preloaded[8];
+        if (wave_id == 0) {
+            x_preloaded = (((const block_q4_K *)vx) + kbx_offset + kbx)[0];
+#pragma unroll
+            for (int idx = 0; idx < 8; ++idx) {
+                y_preloaded[idx] = y[kby + idx];
+            }
+        }
+
+        for (; group_a_start_idx < blocks_per_row_x; group_a_start_idx += blocks_per_iter) {
+            tid = group_a_start_idx + wave_id*warp_size + threadIdx.x;
+            // x block quant index when casting the quants to int
+            const int kqs = vdr * (tid % (qi/vdr));
 
 #pragma unroll
-        for (int j = 0; j < ncols_dst; ++j) {
+            for (int j = 0; j < ncols_dst; ++j) {
 #pragma unroll
-            for (int i = 0; i < rows_per_cuda_block; ++i) {
-                tmp[j][i] += vec_dot_q_cuda(
-                    vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                for (int i = 0; i < rows_per_cuda_block; ++i) {
+                    if (wave_id == 0) {
+                        // Phase 1, wave 0: compute.
+                        //tmp[j][i] += vec_dot_q_cuda(
+                        //    vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                        tmp[j][i] += vec_dot_q_cuda(
+                            (const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
+                        two_waves.sync();
+
+                        // Phase 2, wave 0: load.
+                        if (int next_group_a_start_idx = group_a_start_idx + blocks_per_iter; next_group_a_start_idx < blocks_per_row_x) {
+                            tid = next_group_a_start_idx + threadIdx.x;
+                            kbx = tid / (qi/vdr);
+                            kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
+                            x_preloaded = (((const block_q4_K *)vx) + kbx_offset + i*stride_row_x + kbx)[0];
+#pragma unroll
+                            for (int idx = 0; idx < 8; ++idx) {
+                                y_preloaded[idx] = y[kby + j*stride_col_y + idx];
+                            }
+                        }
+                        two_waves.sync();
+                    } else {
+                        // Phase 1, wave 1: load.
+                        kbx = tid / (qi/vdr);
+                        kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
+                        x_preloaded = (((const block_q4_K *)vx) + kbx_offset + i*stride_row_x + kbx)[0];
+#pragma unroll
+                        for (int idx = 0; idx < 8; ++idx) {
+                            y_preloaded[idx] = y[kby + j*stride_col_y + idx];
+                        }
+                        two_waves.sync();
+
+                        // Phase 2, wave 1: compute.
+                        tmp[j][i] += vec_dot_q_cuda(
+                            (const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
+                        two_waves.sync();
+                    }
+                }
             }
         }
     }
@@ -202,7 +260,7 @@ static __global__ void mul_mat_vec_q(
         }
     }
     __syncthreads();
-    if (threadIdx.y > 0) {
+    if (!(threadIdx.y == 0 && threadIdx.z == 0)) {
         return;
     }
 
@@ -231,7 +289,7 @@ static std::pair<dim3, dim3> calc_launch_params(
         const int warp_size, const mmvq_parameter_table_id table_id) {
     const int64_t nblocks = (nrows_x + calc_rows_per_block(ncols_dst, table_id) - 1) / calc_rows_per_block(ncols_dst, table_id);
     const dim3 block_nums(nblocks, nchannels_y, nsamples_y);
-    const dim3 block_dims(warp_size, calc_nwarps(ncols_dst, table_id), 1);
+    const dim3 block_dims(warp_size, calc_nwarps(ncols_dst, table_id), 2);
     return {block_nums, block_dims};
 }
 
