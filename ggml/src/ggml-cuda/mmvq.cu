@@ -115,7 +115,7 @@ static constexpr __host__ __device__ int calc_nwarps(int ncols_dst,  mmvq_parame
                 return 1;
         }
     }
-    return 8;
+    return 1;
 }
 
 static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int table_id) {
@@ -178,49 +178,83 @@ static __global__ void mul_mat_vec_q(
     const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row0*stride_row_x;
 
     {
-        int group_a_start_idx = warp_size*2*threadIdx.y + threadIdx.x;
         //cooperative_groups::thread_block_tile<2*warp_size, cooperative_groups::thread_block> two_waves(cooperative_groups::this_thread_block());
-        auto two_waves = cooperative_groups::tiled_partition<2*warp_size>(cooperative_groups::this_thread_block());
+        constexpr const int group_size = 2*warp_size;
+        auto two_waves = cooperative_groups::tiled_partition<group_size>(cooperative_groups::this_thread_block());
         const int wave_id = two_waves.thread_rank() / warp_size;
-        //int kbx = tid / (qi/vdr);
-        int tid = group_a_start_idx + wave_id*warp_size + threadIdx.x;
+        const int tid = group_size*two_waves.meta_group_rank() + two_waves.thread_rank();
         int kbx = tid / (qi/vdr);
         int kby = kbx * (qk/QK8_1);
+        // x block quant index when casting the quants to int
+        const int kqs = vdr * (tid % (qi/vdr));
 
-        // TODO make enough space for all types?
+        // TODO generalize load for different datatypes
         //uint8_t x_preloaded[*sizeof(block_q4_K)];
         block_q4_K x_preloaded;
         block_q8_1 y_preloaded[8];
-        if (wave_id == 0) {
+        // TODO Since one warp processes 2+ blocks, check for out of bounds memory access.
+        if (wave_id == 0 && kbx < blocks_per_row_x) {
             x_preloaded = (((const block_q4_K *)vx) + kbx_offset + kbx)[0];
 #pragma unroll
             for (int idx = 0; idx < 8; ++idx) {
                 y_preloaded[idx] = y[kby + idx];
             }
         }
+        two_waves.sync(); // Ensure wave 0 finishes loading before both waves enter loop
 
-        for (; group_a_start_idx < blocks_per_row_x; group_a_start_idx += blocks_per_iter) {
-            tid = group_a_start_idx + wave_id*warp_size + threadIdx.x;
-            // x block quant index when casting the quants to int
-            const int kqs = vdr * (tid % (qi/vdr));
-
+        // GGML_TYPE_Q4_K
+        // qi = QI4_K = 32
+        // vdr = VDR_Q4_K_Q8_1_MMVQ = 2
+        // Therefore one warp processes 2 blocks.
+        // TODO Since one warp processes 2+ blocks, check for out of bounds memory access.
+        for (int group_x_start_idx = group_size*two_waves.meta_group_rank() / (qi/vdr); group_x_start_idx < blocks_per_row_x; group_x_start_idx += blocks_per_iter) {
 #pragma unroll
             for (int j = 0; j < ncols_dst; ++j) {
 #pragma unroll
                 for (int i = 0; i < rows_per_cuda_block; ++i) {
+                    const bool phase_active = kbx < blocks_per_row_x;
                     if (wave_id == 0) {
                         // Phase 1, wave 0: compute.
                         //tmp[j][i] += vec_dot_q_cuda(
                         //    vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
-                        tmp[j][i] += vec_dot_q_cuda(
-                            (const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
+                        if (phase_active) {
+                            tmp[j][i] += vec_dot_q_cuda(
+                                (const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
+                        }
                         two_waves.sync();
 
                         // Phase 2, wave 0: load.
-                        if (int next_group_a_start_idx = group_a_start_idx + blocks_per_iter; next_group_a_start_idx < blocks_per_row_x) {
-                            tid = next_group_a_start_idx + threadIdx.x;
-                            kbx = tid / (qi/vdr);
+                        // Nontrivial logic is caused by nested loops and the need to load next chunk of data, which is purposed for next loop iteration.
+                        // TODO replace by iterator objects?
+                        if (int next_i = i + 1; next_i < rows_per_cuda_block) {
+                            // next_i = i + 1; next_j = j. reload x only
+                            // quantized block is the same as before. no need to update tid/kbx/kby/kqs
+                            x_preloaded = (((const block_q4_K *)vx) + kbx_offset + next_i*stride_row_x + kbx)[0];
+                        } else if (int next_j = j + 1; next_j < ncols_dst) {
+                            // next_i = 0; next_j = j + 1. reload both x and y
+                            // quantized block is the same as before. no need to update tid/kbx/kby/kqs
+                            x_preloaded = (((const block_q4_K *)vx) + kbx_offset + kbx)[0];
+#pragma unroll
+                            for (int idx = 0; idx < 8; ++idx) {
+                                y_preloaded[idx] = y[kby + next_j*stride_col_y + idx];
+                            }
+                        //} else if (group_x_start_idx + blocks_per_iter < blocks_per_row_x) {
+                        } else {
+                            // next_i = 0; next_j = 0. reload both x and y
+                            kbx += blocks_per_iter;
                             kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
+                            if (kbx < blocks_per_row_x) {
+                                x_preloaded = (((const block_q4_K *)vx) + kbx_offset + kbx)[0];
+#pragma unroll
+                                for (int idx = 0; idx < 8; ++idx) {
+                                    y_preloaded[idx] = y[kby + idx];
+                                }
+                            }
+                        }
+                        two_waves.sync();
+                    } else {
+                        // Phase 1, wave 1: load.
+                        if (phase_active) {
                             x_preloaded = (((const block_q4_K *)vx) + kbx_offset + i*stride_row_x + kbx)[0];
 #pragma unroll
                             for (int idx = 0; idx < 8; ++idx) {
@@ -228,34 +262,33 @@ static __global__ void mul_mat_vec_q(
                             }
                         }
                         two_waves.sync();
-                    } else {
-                        // Phase 1, wave 1: load.
-                        kbx = tid / (qi/vdr);
-                        kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
-                        x_preloaded = (((const block_q4_K *)vx) + kbx_offset + i*stride_row_x + kbx)[0];
-#pragma unroll
-                        for (int idx = 0; idx < 8; ++idx) {
-                            y_preloaded[idx] = y[kby + j*stride_col_y + idx];
-                        }
-                        two_waves.sync();
 
                         // Phase 2, wave 1: compute.
-                        tmp[j][i] += vec_dot_q_cuda(
-                            (const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
+                        if (phase_active) {
+                            tmp[j][i] += vec_dot_q_cuda(
+                                (const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
+                        }
                         two_waves.sync();
                     }
                 }
+            }
+            // Update kbx/kby for wave 1 after completing all i,j iterations
+            if (wave_id == 1) {
+                kbx += blocks_per_iter;
+                kby = kbx * (qk/QK8_1);
             }
         }
     }
 
     __shared__ float tmp_shared[nwarps-1 > 0 ? nwarps-1 : 1][ncols_dst][rows_per_cuda_block][warp_size];
-    if (threadIdx.y > 0) {
+    if (!(threadIdx.y == 0 && threadIdx.z == 0)) {
+        const int wave_id = threadIdx.y * blockDim.z + threadIdx.z;
 #pragma unroll
         for (int j = 0; j < ncols_dst; ++j) {
 #pragma unroll
             for (int i = 0; i < rows_per_cuda_block; ++i) {
-                tmp_shared[threadIdx.y-1][j][i][threadIdx.x] = tmp[j][i];
+                //tmp_shared[threadIdx.y-1][j][i][threadIdx.x] = tmp[j][i];
+                tmp_shared[wave_id][j][i][threadIdx.x] = tmp[j][i];
             }
         }
     }
