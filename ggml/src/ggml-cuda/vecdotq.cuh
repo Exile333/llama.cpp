@@ -807,7 +807,7 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     const uint8_t * m  = sc + 2;
 
     for (int i = 0; i < QR4_K; ++i) {
-        const block_q8_1 * bq8i = bq8_1 + bq8_offset + i;
+        const block_q8_1 * bq8i = bq8_1 + i;
         d8[i] = __low2float(bq8i->ds);
 
         const int * q8 = (const int *)bq8i->qs + ((iqs/2)%4);

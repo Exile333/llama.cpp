@@ -255,18 +255,25 @@ static __global__ void mul_mat_vec_q(
         };
         */
         int kbx = tid / (qi/vdr);
-        int kby = kbx * (qk/QK8_1);
         const int kqs = vdr * (tid % (qi/vdr));
+        // iqs is in 0,2..30. bq8_offset = iqs/4 -> bq8_offset = 0, 2, 4, 6
+        const int bq8_offset = QR4_K * ((kqs/2) / (QI8_1/2));
+        //int kby = kbx * (qk/QK8_1);
+        int kby = kbx * (qk/QK8_1) + bq8_offset;
         // TODO generalize load for different datatypes
         //uint8_t x_preloaded[*sizeof(block_q4_K)];
-        block_q4_K x_preloaded;
-        block_q8_1 y_preloaded[8];
+        //block_q4_K x_preloaded;
+        block_q8_1 y_preloaded[2];
         // Since one warp processes 2+ blocks, check for out of bounds memory access.
         bool phase_active = kbx < blocks_per_row_x;
+        // kqs = 0....3 -> bq8_offset = 0
+        // kqs = 4....7 -> bq8_offset = 2
+        // kqs = 8...11 -> bq8_offset = 4
+        // kqs = 12..15 -> bq8_offset = 6
         if (wave_id == 0 && phase_active) {
-            x_preloaded = ((const block_q4_K *)vx)[kbx_offset + kbx];
+            //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + kbx];
 #pragma unroll
-            for (int idx = 0; idx < 8; ++idx) {
+            for (int idx = 0; idx < 2; ++idx) {
                 y_preloaded[idx] = y[kby + idx];
             }
         }
@@ -274,7 +281,7 @@ static __global__ void mul_mat_vec_q(
 
         for (int group_start_idx = two_waves.meta_group_rank() * group_size / (qi/vdr); group_start_idx < blocks_per_row_x; group_start_idx += blocks_per_iter) {
             phase_active = kbx < blocks_per_row_x;
-            kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
+            kby = kbx * (qk/QK8_1) + bq8_offset;
 #pragma unroll
             for (int i = 0; i < rows_per_cuda_block; ++i) {
                 //tmp_local[i] += vec_dot_q_cuda(
@@ -284,7 +291,8 @@ static __global__ void mul_mat_vec_q(
                     // Wave 0, phase 1: compute.
                     if (phase_active) {
                         tmp_local[i] += vec_dot_q_cuda(
-                            (const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
+                            //(const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
+                            vx, (const block_q8_1 *)&y_preloaded, kbx_offset + i*stride_row_x + kbx, kqs);
                     }
                     two_waves.sync();
 
@@ -292,20 +300,20 @@ static __global__ void mul_mat_vec_q(
                     if (int next_i = i + 1; next_i < rows_per_cuda_block) {
                         // load only row block, column block is fine
                         if (phase_active) {
-                            x_preloaded = ((const block_q4_K *)vx)[kbx_offset + next_i*stride_row_x + kbx];
+                            //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + next_i*stride_row_x + kbx];
                         }
                     } else if (int next_grst_idx = group_start_idx + blocks_per_iter; next_grst_idx) {
                         // check if there is a next iteration
                         // if there is, check if we are in memory bounds
                         // if everything is ok, load next block for both row #0 and column
                         int next_kbx = kbx + blocks_per_iter;
-                        int next_kby = next_kbx * (qk/QK8_1);
+                        int next_kby = next_kbx * (qk/QK8_1) + bq8_offset;
                         phase_active = next_kbx < blocks_per_row_x;
                         if (phase_active) {
-                            x_preloaded = ((const block_q4_K *)vx)[kbx_offset + next_kbx];
+                            //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + next_kbx];
 #pragma unroll
-                            for (int idx = 0; idx < 8; ++idx) {
-                                y_preloaded[idx] = y[kby + idx];
+                            for (int idx = 0; idx < 2; ++idx) {
+                                y_preloaded[idx] = y[next_kby + idx];
                             }
                         }
                     }
@@ -313,9 +321,9 @@ static __global__ void mul_mat_vec_q(
                 } else {
                     // Wave 1, phase 1: load.
                     if (phase_active) {
-                        x_preloaded = ((const block_q4_K *)vx)[kbx_offset + i*stride_row_x + kbx];
+                        //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + i*stride_row_x + kbx];
 #pragma unroll
-                        for (int idx = 0; idx < 8; ++idx) {
+                        for (int idx = 0; idx < 2; ++idx) {
                             y_preloaded[idx] = y[kby + idx];
                         }
                     }
@@ -324,7 +332,8 @@ static __global__ void mul_mat_vec_q(
                     // Wave 1, phase 2: compute.
                     if (phase_active) {
                         tmp_local[i] += vec_dot_q_cuda(
-                            (const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
+                            //(const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
+                            vx, (const block_q8_1 *)&y_preloaded, kbx_offset + i*stride_row_x + kbx, kqs);
                     }
                     two_waves.sync();
                 }
