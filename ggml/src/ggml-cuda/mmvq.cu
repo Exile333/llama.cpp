@@ -60,6 +60,50 @@ static constexpr __device__ int get_vdr_mmvq(ggml_type type) {
     }
 }
 
+// TODO Infer these params.
+// TODO Provide more datatypes.
+static constexpr __device__ int get_q8_1_blocks_cnt(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q4_0:    return 1;
+        case GGML_TYPE_Q4_K:    return 2;
+        case GGML_TYPE_Q6_K:    return 8; // TODO load only the data needed.
+        default:                return 1;
+    }
+}
+
+typedef int (*get_q8_1_block_offset_t)(const int& tid);
+
+static __device__ __forceinline__ int get_q8_1_block_offset_placeholder(const int&) {
+    return 0;
+}
+
+static __device__ __forceinline__ int get_q4_0_q8_1_block_offset(const int&) {
+    return 0;
+}
+
+static __device__ __forceinline__ int get_q4_k_q8_1_block_offset(const int& tid) {
+    // kqs is in 0,2..30. bq8_offset = iqs/4 -> bq8_offset = 0, 2, 4, 6.
+    constexpr const int qi  = ggml_cuda_type_traits<GGML_TYPE_Q4_0>::qi;
+    constexpr const int vdr = get_vdr_mmvq(GGML_TYPE_Q4_0);
+    const int kqs = vdr * (tid % (qi/vdr));
+
+    return QR4_K * ((kqs/2) / (QI8_1/2));
+}
+static __device__ __forceinline__ int get_q6_k_q8_1_block_offset(const int& tid) {
+    // TODO
+    return 0;
+}
+
+// TODO more types
+static constexpr __device__ get_q8_1_block_offset_t get_q8_1_block_offset_getter(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q4_0:    return get_q4_0_q8_1_block_offset;
+        case GGML_TYPE_Q4_K:    return get_q4_k_q8_1_block_offset;
+        case GGML_TYPE_Q6_K:    return get_q6_k_q8_1_block_offset;
+        default:                return nullptr;
+    }
+}
+
 enum mmvq_parameter_table_id {
     MMVQ_PARAMETERS_GENERIC = 0,
     MMVQ_PARAMETERS_GCN,
@@ -199,8 +243,10 @@ static __global__ void mul_mat_vec_q(
         const uint32_t stride_sample_x, const uint32_t stride_sample_y, const uint32_t stride_sample_dst) {
 
     constexpr int qk  = ggml_cuda_type_traits<type>::qk;
+    constexpr int qr  = ggml_cuda_type_traits<type>::qr;
     constexpr int qi  = ggml_cuda_type_traits<type>::qi;
     constexpr int vdr = get_vdr_mmvq(type);
+    constexpr int q8_1_blocks_preloaded_cnt = get_q8_1_blocks_cnt(type);
     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
     constexpr int nwarps = calc_nwarps(ncols_dst, table_id);
     constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id);
@@ -228,21 +274,14 @@ static __global__ void mul_mat_vec_q(
     float tmp_local[rows_per_cuda_block] = {0.0f};
     __shared__ float tmp_shared[rows_per_cuda_block][nwarps];
 
-    /*
-    constexpr uint32_t column_buf_size = 1024;
-    __shared__ block_q8_1 column[column_buf_size];
-    for (int idx = tid, lim = stride_col_y; idx < lim; idx += blockDim.x * blockDim.y) {
-        column[idx] = ((const block_q8_1 *) vy)[sample_y*stride_sample_y + channel_y*stride_channel_y + col_j*stride_col_y + idx];
-    } 
-    */
     // partial sum for each thread
-    //constexpr uint32_t block_q8_cnt = 256;
-    //cooperative_groups::thread_block_tile<2*warp_size, cooperative_groups::thread_block> two_waves(cooperative_groups::this_thread_block());
     {
-        static_assert(nwarps >= 2, "can't use ping pong strategy");
-        constexpr const int group_size = 2*warp_size;
-        auto two_waves = cooperative_groups::tiled_partition<group_size>(cooperative_groups::this_thread_block());
-        const int wave_id = two_waves.thread_rank() / warp_size;
+        // NOTE Group size can't be greater than warp_size both on AMD and NVidia hardware. It also has to be a power of 2.
+        // For AMD Navi GPUs one can use group of size 64.
+        constexpr const int group_size = warp_size*2;
+        static_assert(group_size >= 2, "Group size is too small to apply ping-pong strategy.");
+        auto two_subgroups = cooperative_groups::tiled_partition<group_size>(cooperative_groups::this_thread_block());
+        const int subgroup_id = two_subgroups.thread_rank() / (group_size / 2);
 
         /*
         TMMVQIterState iter_state{
@@ -256,30 +295,23 @@ static __global__ void mul_mat_vec_q(
         */
         int kbx = tid / (qi/vdr);
         const int kqs = vdr * (tid % (qi/vdr));
-        // iqs is in 0,2..30. bq8_offset = iqs/4 -> bq8_offset = 0, 2, 4, 6
-        const int bq8_offset = QR4_K * ((kqs/2) / (QI8_1/2));
-        //int kby = kbx * (qk/QK8_1);
+        const int bq8_offset = get_q8_1_block_offset_getter(type)(tid);
         int kby = kbx * (qk/QK8_1) + bq8_offset;
-        // TODO generalize load for different datatypes
         //uint8_t x_preloaded[*sizeof(block_q4_K)];
-        //block_q4_K x_preloaded;
-        block_q8_1 y_preloaded[2];
-        // Since one warp processes 2+ blocks, check for out of bounds memory access.
+        block_q8_1 y_preloaded[q8_1_blocks_preloaded_cnt];
+        // Since one warp processes multiple blocks, check for out of bounds memory access.
+        // Dims check is done at host, so it is enough to check only x bounds.
         bool phase_active = kbx < blocks_per_row_x;
-        // kqs = 0....3 -> bq8_offset = 0
-        // kqs = 4....7 -> bq8_offset = 2
-        // kqs = 8...11 -> bq8_offset = 4
-        // kqs = 12..15 -> bq8_offset = 6
-        if (wave_id == 0 && phase_active) {
+        if (subgroup_id == 0 && phase_active) {
             //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + kbx];
 #pragma unroll
-            for (int idx = 0; idx < 2; ++idx) {
+            for (int idx = 0; idx < q8_1_blocks_preloaded_cnt; ++idx) {
                 y_preloaded[idx] = y[kby + idx];
             }
         }
-        two_waves.sync(); // Ensure wave 0 finishes loading before both waves enter loop
+        two_subgroups.sync(); // Ensure wave 0 finishes loading before both waves enter loop
 
-        for (int group_start_idx = two_waves.meta_group_rank() * group_size / (qi/vdr); group_start_idx < blocks_per_row_x; group_start_idx += blocks_per_iter) {
+        for (int group_start_idx = two_subgroups.meta_group_rank() * group_size / (qi/vdr); group_start_idx < blocks_per_row_x; group_start_idx += blocks_per_iter) {
             phase_active = kbx < blocks_per_row_x;
             kby = kbx * (qk/QK8_1) + bq8_offset;
 #pragma unroll
@@ -287,14 +319,15 @@ static __global__ void mul_mat_vec_q(
                 //tmp_local[i] += vec_dot_q_cuda(
                 //    vx, &y[col_j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
 
-                if (wave_id == 0) {
+                if (subgroup_id == 0) {
                     // Wave 0, phase 1: compute.
                     if (phase_active) {
                         tmp_local[i] += vec_dot_q_cuda(
                             //(const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
                             vx, (const block_q8_1 *)&y_preloaded, kbx_offset + i*stride_row_x + kbx, kqs);
+                            //vx, &y[kby], kbx_offset + i*stride_row_x + kbx, kqs);
                     }
-                    two_waves.sync();
+                    two_subgroups.sync();
 
                     // Wave 0, phase 2: load.
                     if (int next_i = i + 1; next_i < rows_per_cuda_block) {
@@ -312,30 +345,31 @@ static __global__ void mul_mat_vec_q(
                         if (phase_active) {
                             //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + next_kbx];
 #pragma unroll
-                            for (int idx = 0; idx < 2; ++idx) {
+                            for (int idx = 0; idx < q8_1_blocks_preloaded_cnt; ++idx) {
                                 y_preloaded[idx] = y[next_kby + idx];
                             }
                         }
                     }
-                    two_waves.sync();
+                    two_subgroups.sync();
                 } else {
                     // Wave 1, phase 1: load.
                     if (phase_active) {
                         //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + i*stride_row_x + kbx];
 #pragma unroll
-                        for (int idx = 0; idx < 2; ++idx) {
+                        for (int idx = 0; idx < q8_1_blocks_preloaded_cnt; ++idx) {
                             y_preloaded[idx] = y[kby + idx];
                         }
                     }
-                    two_waves.sync();
+                    two_subgroups.sync();
 
                     // Wave 1, phase 2: compute.
                     if (phase_active) {
                         tmp_local[i] += vec_dot_q_cuda(
                             //(const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
                             vx, (const block_q8_1 *)&y_preloaded, kbx_offset + i*stride_row_x + kbx, kqs);
+                            //vx, &y[kby], kbx_offset + i*stride_row_x + kbx, kqs);
                     }
-                    two_waves.sync();
+                    two_subgroups.sync();
                 }
             }
 
