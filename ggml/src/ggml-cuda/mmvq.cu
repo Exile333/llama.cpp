@@ -66,7 +66,7 @@ static constexpr __device__ int get_q8_1_blocks_cnt(ggml_type type) {
     switch (type) {
         case GGML_TYPE_Q4_0:    return 1;
         case GGML_TYPE_Q4_K:    return 2;
-        case GGML_TYPE_Q6_K:    return 8; // TODO load only the data needed.
+        case GGML_TYPE_Q6_K:    return 3;
         default:                return 1;
     }
 }
@@ -83,15 +83,17 @@ static __device__ __forceinline__ int get_q4_0_q8_1_block_offset(const int&) {
 
 static __device__ __forceinline__ int get_q4_k_q8_1_block_offset(const int& tid) {
     // kqs is in 0,2..30. bq8_offset = iqs/4 -> bq8_offset = 0, 2, 4, 6.
-    constexpr const int qi  = ggml_cuda_type_traits<GGML_TYPE_Q4_0>::qi;
-    constexpr const int vdr = get_vdr_mmvq(GGML_TYPE_Q4_0);
+    constexpr const int qi  = ggml_cuda_type_traits<GGML_TYPE_Q4_K>::qi;
+    constexpr const int vdr = get_vdr_mmvq(GGML_TYPE_Q4_K);
     const int kqs = vdr * (tid % (qi/vdr));
 
     return QR4_K * ((kqs/2) / (QI8_1/2));
 }
 static __device__ __forceinline__ int get_q6_k_q8_1_block_offset(const int& tid) {
-    // TODO
-    return 0;
+    constexpr const int qi  = ggml_cuda_type_traits<GGML_TYPE_Q6_K>::qi;
+    constexpr const int vdr = get_vdr_mmvq(GGML_TYPE_Q6_K);
+    const int kqs = vdr * (tid % (qi/vdr));
+    return 2 * QR6_K * (kqs / (QI6_K/2)) + (kqs % (QI6_K/2)) / (QI6_K/4);
 }
 
 // TODO more types

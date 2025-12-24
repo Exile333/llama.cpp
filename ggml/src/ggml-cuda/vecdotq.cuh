@@ -869,7 +869,8 @@ static __device__ __forceinline__ float vec_dot_q6_K_q8_1(
 
     const block_q6_K * bq6_K = (const block_q6_K *) vbq + kbx;
 
-    const int bq8_offset = 2 * QR6_K * (iqs / (QI6_K/2)) + (iqs % (QI6_K/2)) / (QI6_K/4);
+    //const int bq8_offset = 2 * QR6_K * (iqs / (QI6_K/2)) + (iqs % (QI6_K/2)) / (QI6_K/4);
+    constexpr const int bq8_offset = 0;
     const int scale_offset = (QI6_K/4) * (iqs / (QI6_K/2)) + (iqs % (QI6_K/2)) / (QI6_K/8);
     const int vh_shift = 2 * ((iqs % (QI6_K/2)) / (QI6_K/4));
 
