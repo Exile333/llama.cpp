@@ -599,6 +599,27 @@ static __device__ __forceinline__ float vec_dot_q6_K_q8_1_impl_mmvq(
     return d*sumf;
 }
 
+// contiguous v/x values
+static __device__ __forceinline__ float vec_dot_q6_K_q8_1_impl_mmvq_preloaded_data(
+    const int & vl, const int & vh, const int * __restrict__ u, const int8_t * __restrict__ scales,
+    const float & d, const float * __restrict__ d8) {
+
+    float sumf = 0.0f;
+
+#pragma unroll
+    for (int i = 0; i < QR6_K; ++i) {
+        const int vil = (vl >> (4*i)) & 0x0F0F0F0F;
+
+        const int vih = ((vh >> (4*i)) << 4) & 0x30303030;
+
+        const int vi = __vsubss4((vil | vih), 0x20202020); // vi = (vil | vih) - 32
+
+        sumf += d8[i] * (ggml_cuda_dp4a(vi, u[i], 0) * scales[i]); // SIMD dot product
+    }
+
+    return d*sumf;
+}
+
 // contiguous v/x + u/y values
 static __device__ __forceinline__ float vec_dot_q6_K_q8_1_impl_mmq(
     const int * __restrict__ v, const int * __restrict__ u, const int8_t * __restrict__ sc,
@@ -869,8 +890,7 @@ static __device__ __forceinline__ float vec_dot_q6_K_q8_1(
 
     const block_q6_K * bq6_K = (const block_q6_K *) vbq + kbx;
 
-    //const int bq8_offset = 2 * QR6_K * (iqs / (QI6_K/2)) + (iqs % (QI6_K/2)) / (QI6_K/4);
-    constexpr const int bq8_offset = 0;
+    const int bq8_offset = 2 * QR6_K * (iqs / (QI6_K/2)) + (iqs % (QI6_K/2)) / (QI6_K/4);
     const int scale_offset = (QI6_K/4) * (iqs / (QI6_K/2)) + (iqs % (QI6_K/2)) / (QI6_K/8);
     const int vh_shift = 2 * ((iqs % (QI6_K/2)) / (QI6_K/4));
 
@@ -889,6 +909,33 @@ static __device__ __forceinline__ float vec_dot_q6_K_q8_1(
     }
 
     return vec_dot_q6_K_q8_1_impl_mmvq(vl, vh, u, scales, bq6_K->d, d8);
+}
+
+struct preloaded_data_q6_K_q8_1{
+    int vl;
+    int vh;
+    int scales_q8_1[QR6_K];
+    float ds_q8_1[QR6_K];
+    int8_t scales_q6_K[QR6_K];
+    ggml_half d_q6_K;
+};
+static_assert(
+    sizeof(preloaded_data_q6_K_q8_1) == (2 + QR6_K) * sizeof(int) + QR6_K * sizeof(float) + sizeof(ggml_half) + QR6_K,
+    "wrong size/padding of preloaded data for vecdot op Q6_K x Q8_1");
+//static_assert(
+ //   sizeof(preloaded_data_q6_K_q8_1) == 28,
+  //  "wrong size/padding of preloaded data for vecdot op Q6_K x Q8_1");
+
+static __device__ __forceinline__ float vec_dot_q6_K_q8_1_preloaded_data(const void * __restrict__ preloaded_data_void) {
+    const preloaded_data_q6_K_q8_1 * preloaded_data = (const preloaded_data_q6_K_q8_1 *) preloaded_data_void;
+
+    return vec_dot_q6_K_q8_1_impl_mmvq_preloaded_data(
+        preloaded_data->vl,
+        preloaded_data->vh,
+        preloaded_data->scales_q8_1,
+        preloaded_data->scales_q6_K,
+        preloaded_data->d_q6_K,
+        preloaded_data->ds_q8_1);
 }
 
 #define VDR_IQ2_XXS_Q8_1_MMVQ 2

@@ -36,6 +36,17 @@ static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) 
     }
 }
 
+typedef float (*vec_dot_q_cuda_preloaded_t)(const void * __restrict__ preloaded_data_void);
+
+static constexpr __device__ vec_dot_q_cuda_preloaded_t get_vec_dot_q_cuda_preloaded(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q4_0:    return nullptr;
+        case GGML_TYPE_Q4_K:    return nullptr;
+        case GGML_TYPE_Q6_K:    return vec_dot_q6_K_q8_1_preloaded_data;
+        default:                return nullptr;
+    }
+}
+
 static constexpr __device__ int get_vdr_mmvq(ggml_type type) {
     switch (type) {
         case GGML_TYPE_Q4_0:    return VDR_Q4_0_Q8_1_MMVQ;
@@ -60,16 +71,7 @@ static constexpr __device__ int get_vdr_mmvq(ggml_type type) {
     }
 }
 
-// TODO Infer these params.
-// TODO Provide more datatypes.
-static constexpr __device__ int get_q8_1_blocks_cnt(ggml_type type) {
-    switch (type) {
-        case GGML_TYPE_Q4_0:    return 1;
-        case GGML_TYPE_Q4_K:    return 2;
-        case GGML_TYPE_Q6_K:    return 3;
-        default:                return 1;
-    }
-}
+////////// Q8_1 preload stuff.
 
 typedef int (*get_q8_1_block_offset_t)(const int& tid);
 
@@ -89,19 +91,75 @@ static __device__ __forceinline__ int get_q4_k_q8_1_block_offset(const int& tid)
 
     return QR4_K * ((kqs/2) / (QI8_1/2));
 }
-static __device__ __forceinline__ int get_q6_k_q8_1_block_offset(const int& tid) {
-    constexpr const int qi  = ggml_cuda_type_traits<GGML_TYPE_Q6_K>::qi;
-    constexpr const int vdr = get_vdr_mmvq(GGML_TYPE_Q6_K);
-    const int kqs = vdr * (tid % (qi/vdr));
-    return 2 * QR6_K * (kqs / (QI6_K/2)) + (kqs % (QI6_K/2)) / (QI6_K/4);
+
+typedef void (*y_preloader_t)(const block_q8_1 * __restrict__ y, uint8_t * __restrict__ result, const int& kby, const int& kqs);
+
+static __device__ __forceinline__ void y_q6_k_preloader(const block_q8_1 * __restrict__ y, uint8_t * __restrict__ result, const int& kby, const int& kqs) {
+    preloaded_data_q6_K_q8_1 * preloaded_data = (preloaded_data_q6_K_q8_1 *) result;
+    const int y_offset = 2 * QR6_K * (kqs / (QI6_K/2)) + (kqs % (QI6_K/2)) / (QI6_K/4);
+
+#pragma unroll
+    for (int i = 0; i < QR6_K; ++i) {
+        preloaded_data->scales_q8_1[i]  = get_int_b4(y[kby + y_offset + 2*i].qs, kqs % QI8_1);
+        preloaded_data->ds_q8_1[i] = __low2float(y[kby + y_offset + 2*i].ds);
+    }
 }
 
 // TODO more types
-static constexpr __device__ get_q8_1_block_offset_t get_q8_1_block_offset_getter(ggml_type type) {
+static constexpr __device__ y_preloader_t get_y_preloader(ggml_type type) {
     switch (type) {
-        case GGML_TYPE_Q4_0:    return get_q4_0_q8_1_block_offset;
-        case GGML_TYPE_Q4_K:    return get_q4_k_q8_1_block_offset;
-        case GGML_TYPE_Q6_K:    return get_q6_k_q8_1_block_offset;
+        case GGML_TYPE_Q4_0:    return nullptr;
+        case GGML_TYPE_Q4_K:    return nullptr;
+        case GGML_TYPE_Q6_K:    return y_q6_k_preloader;
+        default:                return nullptr;
+    }
+}
+
+///////////////////// x preload stuff
+
+// TODO Infer these params.
+// TODO Provide more datatypes.
+static constexpr __device__ int get_preloaded_data_size(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q4_0:    return 1;
+        case GGML_TYPE_Q4_K:    return 1;
+        case GGML_TYPE_Q6_K:    return sizeof(preloaded_data_q6_K_q8_1);
+        default:                return 1;
+    }
+}
+
+typedef void (*x_preloader_t)(const void * __restrict__ vx, uint8_t * __restrict__ result, const int& kbx, const int& kqs);
+
+static __device__ __forceinline__ void x_q4_0_preloader(const void * __restrict__ vx, uint8_t * __restrict__ result, const int& kbx, const int& kqs) {
+    ((block_q4_0 *) result)[0] = ((const block_q4_0 *) vx)[kbx];
+}
+
+static __device__ __forceinline__ void x_q4_k_preloader(const void * __restrict__ vx, uint8_t * __restrict__ result, const int& kbx, const int& kqs) {
+    ((block_q4_K *) result)[0] = ((const block_q4_K *) vx)[kbx];
+}
+
+static __device__ __forceinline__ void x_q6_k_preloader(const void * __restrict__ vx, uint8_t * __restrict__ result, const int& kbx, const int& kqs) {
+    preloaded_data_q6_K_q8_1 * preloaded_data = (preloaded_data_q6_K_q8_1 *) result;
+    const int scale_offset = (QI6_K/4) * (kqs / (QI6_K/2)) + (kqs % (QI6_K/2)) / (QI6_K/8);
+    const int vh_shift = 2 * ((kqs % (QI6_K/2)) / (QI6_K/4));
+
+    const block_q6_K * bq6_K = (const block_q6_K *) vx + kbx;
+
+    preloaded_data->vl = get_int_b2(bq6_K->ql, kqs);
+    preloaded_data->vh = get_int_b2(bq6_K->qh, (QI6_K/4) * (kqs / (QI6_K/2)) + kqs % (QI6_K/4)) >> vh_shift;
+#pragma unroll
+    for (int i = 0; i < QR6_K; ++i) {
+        preloaded_data->scales_q6_K[i] = bq6_K->scales[scale_offset + 4*i];
+    }
+    preloaded_data->d_q6_K = bq6_K->d;
+}
+
+// TODO more types
+static constexpr __device__ x_preloader_t get_x_preloader(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q4_0:    return x_q4_0_preloader;
+        case GGML_TYPE_Q4_K:    return x_q4_k_preloader;
+        case GGML_TYPE_Q6_K:    return x_q6_k_preloader;
         default:                return nullptr;
     }
 }
@@ -248,13 +306,16 @@ static __global__ void mul_mat_vec_q(
     constexpr int qr  = ggml_cuda_type_traits<type>::qr;
     constexpr int qi  = ggml_cuda_type_traits<type>::qi;
     constexpr int vdr = get_vdr_mmvq(type);
-    constexpr int q8_1_blocks_preloaded_cnt = get_q8_1_blocks_cnt(type);
+    constexpr int preloaded_data_size = get_preloaded_data_size(type);
+    constexpr x_preloader_t x_preloader = get_x_preloader(type);
+    constexpr y_preloader_t y_preloader = get_y_preloader(type);
     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
     constexpr int nwarps = calc_nwarps(ncols_dst, table_id);
     constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id);
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 
-    constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
+    //constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
+    constexpr vec_dot_q_cuda_preloaded_t vec_dot_q_cuda_preloaded = get_vec_dot_q_cuda_preloaded(type);
 
     const     int col_j = blockIdx.x % ncols_dst;
     const     int tid = warp_size*threadIdx.y + threadIdx.x;
@@ -297,25 +358,21 @@ static __global__ void mul_mat_vec_q(
         */
         int kbx = tid / (qi/vdr);
         const int kqs = vdr * (tid % (qi/vdr));
-        const int bq8_offset = get_q8_1_block_offset_getter(type)(tid);
-        int kby = kbx * (qk/QK8_1) + bq8_offset;
-        //uint8_t x_preloaded[*sizeof(block_q4_K)];
-        block_q8_1 y_preloaded[q8_1_blocks_preloaded_cnt];
+        int kby = kbx * (qk/QK8_1);
+        uint8_t preloaded_data[preloaded_data_size];
+
         // Since one warp processes multiple blocks, check for out of bounds memory access.
         // Dims check is done at host, so it is enough to check only x bounds.
         bool phase_active = kbx < blocks_per_row_x;
         if (subgroup_id == 0 && phase_active) {
-            //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + kbx];
-#pragma unroll
-            for (int idx = 0; idx < q8_1_blocks_preloaded_cnt; ++idx) {
-                y_preloaded[idx] = y[kby + idx];
-            }
+            x_preloader(vx, preloaded_data, kbx_offset + kbx, kqs);
+            y_preloader(y, preloaded_data, kby, kqs);
         }
         two_subgroups.sync(); // Ensure wave 0 finishes loading before both waves enter loop
 
         for (int group_start_idx = two_subgroups.meta_group_rank() * group_size / (qi/vdr); group_start_idx < blocks_per_row_x; group_start_idx += blocks_per_iter) {
             phase_active = kbx < blocks_per_row_x;
-            kby = kbx * (qk/QK8_1) + bq8_offset;
+            kby = kbx * (qk/QK8_1);
 #pragma unroll
             for (int i = 0; i < rows_per_cuda_block; ++i) {
                 //tmp_local[i] += vec_dot_q_cuda(
@@ -324,10 +381,7 @@ static __global__ void mul_mat_vec_q(
                 if (subgroup_id == 0) {
                     // Wave 0, phase 1: compute.
                     if (phase_active) {
-                        tmp_local[i] += vec_dot_q_cuda(
-                            //(const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
-                            vx, (const block_q8_1 *)&y_preloaded, kbx_offset + i*stride_row_x + kbx, kqs);
-                            //vx, &y[kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                        tmp_local[i] += vec_dot_q_cuda_preloaded(preloaded_data);
                     }
                     two_subgroups.sync();
 
@@ -335,41 +389,36 @@ static __global__ void mul_mat_vec_q(
                     if (int next_i = i + 1; next_i < rows_per_cuda_block) {
                         // load only row block, column block is fine
                         if (phase_active) {
-                            //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + next_i*stride_row_x + kbx];
+                            x_preloader(vx, preloaded_data, kbx_offset + next_i*stride_row_x + kbx, kqs);
                         }
                     } else if (int next_grst_idx = group_start_idx + blocks_per_iter; next_grst_idx) {
                         // check if there is a next iteration
                         // if there is, check if we are in memory bounds
                         // if everything is ok, load next block for both row #0 and column
                         int next_kbx = kbx + blocks_per_iter;
-                        int next_kby = next_kbx * (qk/QK8_1) + bq8_offset;
+                        int next_kby = next_kbx * (qk/QK8_1);
                         phase_active = next_kbx < blocks_per_row_x;
                         if (phase_active) {
-                            //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + next_kbx];
-#pragma unroll
-                            for (int idx = 0; idx < q8_1_blocks_preloaded_cnt; ++idx) {
-                                y_preloaded[idx] = y[next_kby + idx];
-                            }
+                            x_preloader(vx, preloaded_data, kbx_offset + next_kbx, kqs);
+                            y_preloader(y, preloaded_data, next_kby, kqs);
                         }
                     }
                     two_subgroups.sync();
                 } else {
                     // Wave 1, phase 1: load.
                     if (phase_active) {
-                        //x_preloaded = ((const block_q4_K *)vx)[kbx_offset + i*stride_row_x + kbx];
-#pragma unroll
-                        for (int idx = 0; idx < q8_1_blocks_preloaded_cnt; ++idx) {
-                            y_preloaded[idx] = y[kby + idx];
-                        }
+                        x_preloader(vx, preloaded_data, kbx_offset + i*stride_row_x + kbx, kqs);
+
+                        // Update column only if we have moved to the next block.
+                        //if (i == 0) {
+                            y_preloader(y, preloaded_data, kby, kqs);
+                        //}
                     }
                     two_subgroups.sync();
 
                     // Wave 1, phase 2: compute.
                     if (phase_active) {
-                        tmp_local[i] += vec_dot_q_cuda(
-                            //(const void*)&x_preloaded, (const block_q8_1 *)&y_preloaded, 0, kqs);
-                            vx, (const block_q8_1 *)&y_preloaded, kbx_offset + i*stride_row_x + kbx, kqs);
-                            //vx, &y[kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                        tmp_local[i] += vec_dot_q_cuda_preloaded(preloaded_data);
                     }
                     two_subgroups.sync();
                 }
