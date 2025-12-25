@@ -40,7 +40,7 @@ typedef float (*vec_dot_q_cuda_preloaded_t)(const void * __restrict__ preloaded_
 
 static constexpr __device__ vec_dot_q_cuda_preloaded_t get_vec_dot_q_cuda_preloaded(ggml_type type) {
     switch (type) {
-        case GGML_TYPE_Q4_0:    return nullptr;
+        case GGML_TYPE_Q4_0:    return vec_dot_q4_0_q8_1_preloaded_data;
         case GGML_TYPE_Q4_K:    return nullptr;
         case GGML_TYPE_Q6_K:    return vec_dot_q6_K_q8_1_preloaded_data;
         default:                return nullptr;
@@ -73,16 +73,6 @@ static constexpr __device__ int get_vdr_mmvq(ggml_type type) {
 
 ////////// Q8_1 preload stuff.
 
-typedef int (*get_q8_1_block_offset_t)(const int& tid);
-
-static __device__ __forceinline__ int get_q8_1_block_offset_placeholder(const int&) {
-    return 0;
-}
-
-static __device__ __forceinline__ int get_q4_0_q8_1_block_offset(const int&) {
-    return 0;
-}
-
 static __device__ __forceinline__ int get_q4_k_q8_1_block_offset(const int& tid) {
     // kqs is in 0,2..30. bq8_offset = iqs/4 -> bq8_offset = 0, 2, 4, 6.
     constexpr const int qi  = ggml_cuda_type_traits<GGML_TYPE_Q4_K>::qi;
@@ -94,13 +84,24 @@ static __device__ __forceinline__ int get_q4_k_q8_1_block_offset(const int& tid)
 
 typedef void (*y_preloader_t)(const block_q8_1 * __restrict__ y, uint8_t * __restrict__ result, const int& kby, const int& kqs);
 
+static __device__ __forceinline__ void y_q4_0_preloader(const block_q8_1 * __restrict__ y, uint8_t * __restrict__ result, const int& kby, const int& kqs) {
+    preloaded_data_q4_0_q8_1 * preloaded_data = (preloaded_data_q4_0_q8_1 *) result;
+
+#pragma unroll
+    for (int i = 0; i < VDR_Q4_0_Q8_1_MMVQ; ++i) {
+        preloaded_data->scales_q8_1[2*i+0] = get_int_b4(y[kby].qs, kqs + i);
+        preloaded_data->scales_q8_1[2*i+1] = get_int_b4(y[kby].qs, kqs + i + QI4_0);
+    }
+    preloaded_data->ds_q8_1 = y[kby].ds;
+}
+
 static __device__ __forceinline__ void y_q6_k_preloader(const block_q8_1 * __restrict__ y, uint8_t * __restrict__ result, const int& kby, const int& kqs) {
     preloaded_data_q6_K_q8_1 * preloaded_data = (preloaded_data_q6_K_q8_1 *) result;
     const int y_offset = 2 * QR6_K * (kqs / (QI6_K/2)) + (kqs % (QI6_K/2)) / (QI6_K/4);
 
 #pragma unroll
     for (int i = 0; i < QR6_K; ++i) {
-        preloaded_data->scales_q8_1[i]  = get_int_b4(y[kby + y_offset + 2*i].qs, kqs % QI8_1);
+        preloaded_data->scales_q8_1[i] = get_int_b4(y[kby + y_offset + 2*i].qs, kqs % QI8_1);
         preloaded_data->ds_q8_1[i] = __low2float(y[kby + y_offset + 2*i].ds);
     }
 }
@@ -108,7 +109,7 @@ static __device__ __forceinline__ void y_q6_k_preloader(const block_q8_1 * __res
 // TODO more types
 static constexpr __device__ y_preloader_t get_y_preloader(ggml_type type) {
     switch (type) {
-        case GGML_TYPE_Q4_0:    return nullptr;
+        case GGML_TYPE_Q4_0:    return y_q4_0_preloader;
         case GGML_TYPE_Q4_K:    return nullptr;
         case GGML_TYPE_Q6_K:    return y_q6_k_preloader;
         default:                return nullptr;
@@ -121,17 +122,24 @@ static constexpr __device__ y_preloader_t get_y_preloader(ggml_type type) {
 // TODO Provide more datatypes.
 static constexpr __device__ int get_preloaded_data_size(ggml_type type) {
     switch (type) {
-        case GGML_TYPE_Q4_0:    return 1;
-        case GGML_TYPE_Q4_K:    return 1;
+        case GGML_TYPE_Q4_0:    return sizeof(preloaded_data_q4_0_q8_1);
+        case GGML_TYPE_Q4_K:    return 0;
         case GGML_TYPE_Q6_K:    return sizeof(preloaded_data_q6_K_q8_1);
-        default:                return 1;
+        default:                return 0;
     }
 }
 
 typedef void (*x_preloader_t)(const void * __restrict__ vx, uint8_t * __restrict__ result, const int& kbx, const int& kqs);
 
 static __device__ __forceinline__ void x_q4_0_preloader(const void * __restrict__ vx, uint8_t * __restrict__ result, const int& kbx, const int& kqs) {
-    ((block_q4_0 *) result)[0] = ((const block_q4_0 *) vx)[kbx];
+    preloaded_data_q4_0_q8_1 * preloaded_data = (preloaded_data_q4_0_q8_1 *) result;
+    const block_q4_0 * bq4_0 = (const block_q4_0 *) vx + kbx;
+
+#pragma unroll
+    for (int i = 0; i < VDR_Q4_0_Q8_1_MMVQ; ++i) {
+        preloaded_data->scales_q4_0[i] = get_int_b2(bq4_0->qs, kqs + i);
+    }
+    preloaded_data->d_q4_0 = bq4_0->d;
 }
 
 static __device__ __forceinline__ void x_q4_k_preloader(const void * __restrict__ vx, uint8_t * __restrict__ result, const int& kbx, const int& kqs) {
@@ -158,7 +166,7 @@ static __device__ __forceinline__ void x_q6_k_preloader(const void * __restrict_
 static constexpr __device__ x_preloader_t get_x_preloader(ggml_type type) {
     switch (type) {
         case GGML_TYPE_Q4_0:    return x_q4_0_preloader;
-        case GGML_TYPE_Q4_K:    return x_q4_k_preloader;
+        case GGML_TYPE_Q4_K:    return nullptr;
         case GGML_TYPE_Q6_K:    return x_q6_k_preloader;
         default:                return nullptr;
     }
