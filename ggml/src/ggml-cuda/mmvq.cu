@@ -348,7 +348,7 @@ static __global__ void mul_mat_vec_q(
     // partial sum for each thread
     {
         // NOTE Group size can't be greater than warp_size both on AMD and NVidia hardware. It also has to be a power of 2.
-        // For AMD Navi GPUs one can use group of size 64.
+        // For AMD RDNA GPUs one can use group of size 64.
         constexpr const int group_size = warp_size*2;
         static_assert(group_size >= 2, "Group size is too small to apply ping-pong strategy.");
         auto two_subgroups = cooperative_groups::tiled_partition<group_size>(cooperative_groups::this_thread_block());
@@ -418,9 +418,9 @@ static __global__ void mul_mat_vec_q(
                         x_preloader(vx, preloaded_data, kbx_offset + i*stride_row_x + kbx, kqs);
 
                         // Update column only if we have moved to the next block.
-                        //if (i == 0) {
+                        if (i == 0) {
                             y_preloader(y, preloaded_data, kby, kqs);
-                        //}
+                        }
                     }
                     two_subgroups.sync();
 
