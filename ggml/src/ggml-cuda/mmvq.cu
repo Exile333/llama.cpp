@@ -347,92 +347,19 @@ static __global__ void mul_mat_vec_q(
 
     // partial sum for each thread
     {
-        // NOTE Group size can't be greater than warp_size both on AMD and NVidia hardware. It also has to be a power of 2.
-        // For AMD RDNA GPUs one can use group of size 64.
-        constexpr const int group_size = warp_size*2;
-        static_assert(group_size >= 2, "Group size is too small to apply ping-pong strategy.");
-        auto two_subgroups = cooperative_groups::tiled_partition<group_size>(cooperative_groups::this_thread_block());
-        const int subgroup_id = two_subgroups.thread_rank() / (group_size / 2);
-
-        /*
-        TMMVQIterState iter_state{
-            .block_k = tid / (qi/vdr),
-            .row_i = 0,
-            .group_start_block_k = 0,
-            .group_start_row_i = 0,
-            .blocks_cnt = blocks_per_row,
-            .rows_cnt = rows_per_cuda_block,
-        };
-        */
-        int kbx = tid / (qi/vdr);
-        const int kqs = vdr * (tid % (qi/vdr));
-        int kby = kbx * (qk/QK8_1);
         uint8_t preloaded_data[preloaded_data_size];
 
-        // Since one warp processes multiple blocks, check for out of bounds memory access.
-        // Dims check is done at host, so it is enough to check only x bounds.
-        bool phase_active = kbx < blocks_per_row_x;
-        if (subgroup_id == 0 && phase_active) {
-            x_preloader(vx, preloaded_data, kbx_offset + kbx, kqs);
+        for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+            const int kqs = vdr * (tid % (qi/vdr));
+            const int kby = kbx * (qk/QK8_1);
             y_preloader(y, preloaded_data, kby, kqs);
-        }
-        two_subgroups.sync(); // Ensure wave 0 finishes loading before both waves enter loop
-
-        for (int group_start_idx = two_subgroups.meta_group_rank() * group_size / (qi/vdr); group_start_idx < blocks_per_row_x; group_start_idx += blocks_per_iter) {
-            phase_active = kbx < blocks_per_row_x;
-            kby = kbx * (qk/QK8_1);
 #pragma unroll
             for (int i = 0; i < rows_per_cuda_block; ++i) {
+                x_preloader(vx, preloaded_data, kbx_offset + i*stride_row_x + kbx, kqs);
                 //tmp_local[i] += vec_dot_q_cuda(
                 //    vx, &y[col_j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
-
-                if (subgroup_id == 0) {
-                    // Wave 0, phase 1: compute.
-                    if (phase_active) {
-                        tmp_local[i] += vec_dot_q_cuda_preloaded(preloaded_data);
-                    }
-                    two_subgroups.sync();
-
-                    // Wave 0, phase 2: load.
-                    if (int next_i = i + 1; next_i < rows_per_cuda_block) {
-                        // load only row block, column block is fine
-                        if (phase_active) {
-                            x_preloader(vx, preloaded_data, kbx_offset + next_i*stride_row_x + kbx, kqs);
-                        }
-                    } else if (int next_grst_idx = group_start_idx + blocks_per_iter; next_grst_idx) {
-                        // check if there is a next iteration
-                        // if there is, check if we are in memory bounds
-                        // if everything is ok, load next block for both row #0 and column
-                        int next_kbx = kbx + blocks_per_iter;
-                        int next_kby = next_kbx * (qk/QK8_1);
-                        phase_active = next_kbx < blocks_per_row_x;
-                        if (phase_active) {
-                            x_preloader(vx, preloaded_data, kbx_offset + next_kbx, kqs);
-                            y_preloader(y, preloaded_data, next_kby, kqs);
-                        }
-                    }
-                    two_subgroups.sync();
-                } else {
-                    // Wave 1, phase 1: load.
-                    if (phase_active) {
-                        x_preloader(vx, preloaded_data, kbx_offset + i*stride_row_x + kbx, kqs);
-
-                        // Update column only if we have moved to the next block.
-                        if (i == 0) {
-                            y_preloader(y, preloaded_data, kby, kqs);
-                        }
-                    }
-                    two_subgroups.sync();
-
-                    // Wave 1, phase 2: compute.
-                    if (phase_active) {
-                        tmp_local[i] += vec_dot_q_cuda_preloaded(preloaded_data);
-                    }
-                    two_subgroups.sync();
-                }
+                tmp_local[i] += vec_dot_q_cuda_preloaded(preloaded_data);
             }
-
-            kbx += blocks_per_iter;
         }
     }
 
