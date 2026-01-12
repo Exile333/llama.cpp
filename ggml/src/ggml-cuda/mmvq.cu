@@ -268,7 +268,7 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
     } else {
         switch (ncols_dst) {
             case 1:
-                return 2;
+                return 4;
             case 2:
                 return 8;
             case 3:
@@ -347,18 +347,44 @@ static __global__ void mul_mat_vec_q(
 
     // partial sum for each thread
     {
-        uint8_t preloaded_data[preloaded_data_size];
+        const int kqs = vdr * (tid % (qi/vdr));
+        constexpr const int preloaded_data_blocks_count = rows_per_cuda_block;
+        uint8_t preloaded_data[preloaded_data_blocks_count][preloaded_data_size];
+        //bool phase_active = kbx < blocks_per_row_x;
 
+        // TODO Iterate between all blocks seamlessly, without dividing blocks and row.
+        // Currently we are loading single Y block 'preloaded_data_blocks_count' times and then preload as much rows as we can.
         for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
-            const int kqs = vdr * (tid % (qi/vdr));
+            // Preload Y blocks.
             const int kby = kbx * (qk/QK8_1);
-            y_preloader(y, preloaded_data, kby, kqs);
+            y_preloader(y, preloaded_data[0], kby, kqs);
 #pragma unroll
-            for (int i = 0; i < rows_per_cuda_block; ++i) {
-                x_preloader(vx, preloaded_data, kbx_offset + i*stride_row_x + kbx, kqs);
-                //tmp_local[i] += vec_dot_q_cuda(
-                //    vx, &y[col_j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
-                tmp_local[i] += vec_dot_q_cuda_preloaded(preloaded_data);
+            for (int data_block_idx = 1; data_block_idx < preloaded_data_blocks_count; ++data_block_idx) {
+                //preloaded_data[data_block_idx] = preloaded_data[0];
+                y_preloader(y, preloaded_data[data_block_idx], kby, kqs);
+            }
+#pragma unroll
+            for (int i = 0; i < rows_per_cuda_block; i += preloaded_data_blocks_count) {
+                // Preload X blocks.
+#pragma unroll
+                for (int data_block_idx = 0; data_block_idx < preloaded_data_blocks_count; ++data_block_idx) {
+                    const int current_i = i + data_block_idx;
+                    const bool iteration_active = current_i < rows_per_cuda_block;
+                    if (iteration_active) {
+                        x_preloader(vx, preloaded_data[data_block_idx], kbx_offset + current_i*stride_row_x + kbx, kqs);
+                    }
+                }
+                // Compute preloaded blocks.
+#pragma unroll
+                for (int data_block_idx = 0; data_block_idx < preloaded_data_blocks_count; ++data_block_idx) {
+                    const int current_i = i + data_block_idx;
+                    const bool iteration_active = current_i < rows_per_cuda_block;
+                    if (iteration_active) {
+                        //tmp_local[i] += vec_dot_q_cuda(
+                        //    vx, &y[col_j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                        tmp_local[current_i] += vec_dot_q_cuda_preloaded(preloaded_data[data_block_idx]);
+                    }
+                }
             }
         }
     }
