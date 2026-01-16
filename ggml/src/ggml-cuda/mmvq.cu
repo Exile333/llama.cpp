@@ -347,75 +347,51 @@ static __global__ void mul_mat_vec_q(
 
     // partial sum for each thread
     {
-        constexpr const int preloaded_data_blocks_count = 2;
-        constexpr const int process_blocks_per_iteration = 1;
-        constexpr const int initial_blocks_cnt = preloaded_data_blocks_count - process_blocks_per_iteration;
         const int kqs = vdr * (tid % (qi/vdr));
-        uint8_t preloaded_data[preloaded_data_blocks_count][preloaded_data_size];
-        uint8_t row_by_block[preloaded_data_blocks_count] = {0};
-        int total_blocks_cnt = 0;
+        uint8_t preloaded_data[2][preloaded_data_size];
+        uint8_t row_by_block[2] = {0};
         //bool phase_active = kbx < blocks_per_row_x;
 
-        // Initial preload.
         int preload_kbx = tid / (qi/vdr);
-        int preload_kby = preload_kbx * (qk/QK8_1);
-        int preload_row_i = 0;
-        int block_preload_idx = 0;
         if (preload_kbx < blocks_per_row_x) {
-#pragma unroll
-            for (int block_i = 0; block_i < initial_blocks_cnt; ++block_i) {
+            int preload_kby = preload_kbx * (qk/QK8_1);
+            int preload_row_i = 0;
+            int block_preload_idx = 0;
+            int block_process_idx = 0;
+
+            // Initial preload.
+            x_preloader(vx, preloaded_data[block_preload_idx], kbx_offset + preload_row_i*stride_row_x + preload_kbx, kqs);
+            y_preloader(y, preloaded_data[block_preload_idx], preload_kby, kqs);
+            row_by_block[block_preload_idx] = preload_row_i;
+            ++preload_row_i;
+            ++block_preload_idx;
+            if (preload_row_i >= rows_per_cuda_block) {
+                preload_row_i = 0;
+                preload_kbx += blocks_per_iter;
+                preload_kby = preload_kbx * (qk/QK8_1);
+            }
+
+            // Preload + process.
+            while (preload_kbx < blocks_per_row_x) {
+                // Load.
                 x_preloader(vx, preloaded_data[block_preload_idx], kbx_offset + preload_row_i*stride_row_x + preload_kbx, kqs);
                 y_preloader(y, preloaded_data[block_preload_idx], preload_kby, kqs);
                 row_by_block[block_preload_idx] = preload_row_i;
                 ++preload_row_i;
-                ++total_blocks_cnt;
-                //block_preload_idx = (block_preload_idx + 1) % preloaded_data_blocks_count;
-                ++block_preload_idx;
+                block_preload_idx = (block_preload_idx + 1) % 2;
                 if (preload_row_i >= rows_per_cuda_block) {
                     preload_row_i = 0;
                     preload_kbx += blocks_per_iter;
                     preload_kby = preload_kbx * (qk/QK8_1);
-                    if (preload_kbx >= blocks_per_row_x) {
-                        break;
-                    }
                 }
-            }
-        }
 
-        // Preload + process.
-        int block_process_idx = 0;
-        while (total_blocks_cnt > 0) {
-            // Load.
-            if (preload_kbx < blocks_per_row_x) {
-#pragma unroll
-                for (int j = 0; j < process_blocks_per_iteration; ++j) {
-                    x_preloader(vx, preloaded_data[block_preload_idx], kbx_offset + preload_row_i*stride_row_x + preload_kbx, kqs);
-                    y_preloader(y, preloaded_data[block_preload_idx], preload_kby, kqs);
-                    row_by_block[block_preload_idx] = preload_row_i;
-                    ++preload_row_i;
-                    ++total_blocks_cnt;
-                    block_preload_idx = (block_preload_idx + 1) % preloaded_data_blocks_count;
-                    if (preload_row_i >= rows_per_cuda_block) {
-                        preload_row_i = 0;
-                        preload_kbx += blocks_per_iter;
-                        preload_kby = preload_kbx * (qk/QK8_1);
-                        if (preload_kbx >= blocks_per_row_x) {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Process.
-#pragma unroll
-            for (int j = 0; j < process_blocks_per_iteration; ++j) {
-                if (total_blocks_cnt == 0) {
-                    break;
-                }
+                // Process.
                 tmp_local[row_by_block[block_process_idx]] += vec_dot_q_cuda_preloaded(preloaded_data[block_process_idx]);
-                block_process_idx = (block_process_idx + 1) % preloaded_data_blocks_count;
-                --total_blocks_cnt;
+                block_process_idx = (block_process_idx + 1) % 2;
             }
+
+            // Process last block.
+            tmp_local[row_by_block[block_process_idx]] += vec_dot_q_cuda_preloaded(preloaded_data[block_process_idx]);
         }
 
         // Old version.
