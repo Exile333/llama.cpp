@@ -403,19 +403,20 @@ static __global__ void mul_mat_vec_q(
         int block_preload_idx = 0;
         int block_process_idx = 0;
         for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
-            // Preload Y block.
+            // Preload first block.
             const int kby = kbx * (qk/QK8_1);
             y_preloader(y, preloaded_data[0], kby, kqs);
             x_preloader(vx, preloaded_data[0], kbx_offset + kbx, kqs);
 #pragma unroll
             for (int i = 1; i < rows_per_cuda_block; ++i) {
-                // Preload X blocks.
+                // Preload block #i.
                 y_preloader(y, preloaded_data[i], kby, kqs);
                 x_preloader(vx, preloaded_data[i], kbx_offset + i*stride_row_x + kbx, kqs);
 
-                // Compute preloaded blocks.
+                // Compute block #{i-1}.
                 tmp_local[i-1] += vec_dot_q_cuda_preloaded(preloaded_data[i-1]);
             }
+            // Compute last block.
             tmp_local[rows_per_cuda_block-1] += vec_dot_q_cuda_preloaded(preloaded_data[rows_per_cuda_block-1]);
         }
     }
