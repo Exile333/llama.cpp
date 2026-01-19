@@ -163,9 +163,9 @@ static __device__ __forceinline__ void y_mxfp4_preloader(const block_q8_1 * __re
 
 #pragma unroll
     for (int i = 0; i < VDR_MXFP4_Q8_1_MMVQ + 4; ++i) {
-        preloaded_data->scales_q8_1[i] = get_int_b4(y[kby].qs, kqs + i);
+        preloaded_data->u_q8_1[i] = get_int_b4(y[kby].qs, kqs + i);
     }
-    preloaded_data->d_q8_1 = __low2half(y[kby].ds);
+    preloaded_data->ds_q8_1 = y[kby].ds;
 }
 
 static __device__ __forceinline__ void y_q2_k_preloader(const block_q8_1 * __restrict__ y, uint8_t * __restrict__ result, const int& kby, const int& kqs) {
@@ -443,10 +443,9 @@ static __device__ __forceinline__ void x_mxfp4_preloader(const void * __restrict
 
 #pragma unroll
     for (int l = 0; l < VDR_MXFP4_Q8_1_MMVQ; ++l) {
-        const int aux_q4 = get_int_b1(bq4->qs, kqs + l);
-        preloaded_data->v_table[l] = get_int_from_table_16(aux_q4, kvalues_mxfp4);
+        preloaded_data->aux_q4[l] = get_int_b1(bq4->qs, kqs + l);
     }
-    preloaded_data->d_mxfp4 = ggml_cuda_e8m0_to_fp32(bq4->e) * 0.5f;
+    preloaded_data->e_mxfp4 = bq4->e;
 }
 
 static __device__ __forceinline__ void x_q2_k_preloader(const void * __restrict__ vx, uint8_t * __restrict__ result, const int& kbx, const int& kqs) {

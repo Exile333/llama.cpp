@@ -177,10 +177,10 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1_preloaded_data(const v
 // ============= MXFP4 =============
 
 struct preloaded_data_mxfp4_q8_1{
-    int2 v_table[VDR_MXFP4_Q8_1_MMVQ];
-    int scales_q8_1[VDR_MXFP4_Q8_1_MMVQ + 4];
-    float d_mxfp4;
-    ggml_half d_q8_1;
+    int aux_q4[VDR_MXFP4_Q8_1_MMVQ];
+    int u_q8_1[VDR_MXFP4_Q8_1_MMVQ + 4];
+    uint8_t e_mxfp4;
+    ggml_half2 ds_q8_1;
 };
 
 static __device__ __forceinline__ float vec_dot_mxfp4_q8_1_preloaded_data(const void * __restrict__ preloaded_data_void) {
@@ -189,11 +189,13 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1_preloaded_data(const 
     int sumi = 0;
 #pragma unroll
     for (int l = 0; l < VDR_MXFP4_Q8_1_MMVQ; ++l) {
-        sumi = ggml_cuda_dp4a(preloaded_data->v_table[l].x, preloaded_data->scales_q8_1[l + 0], sumi);
-        sumi = ggml_cuda_dp4a(preloaded_data->v_table[l].y, preloaded_data->scales_q8_1[l + 4], sumi);
+        const int2 v = get_int_from_table_16(preloaded_data->aux_q4[l], kvalues_mxfp4);
+
+        sumi = ggml_cuda_dp4a(v.x, preloaded_data->u_q8_1[l + 0], sumi);
+        sumi = ggml_cuda_dp4a(v.y, preloaded_data->u_q8_1[l + 4], sumi);
     }
 
-    const float d = preloaded_data->d_mxfp4 * __half2float(preloaded_data->d_q8_1);
+    const float d = ggml_cuda_e8m0_to_fp32(preloaded_data->e_mxfp4) * 0.5f * __low2float(preloaded_data->ds_q8_1);
     return d * sumi;
 }
 
