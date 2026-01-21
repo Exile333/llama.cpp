@@ -490,15 +490,23 @@ static __device__ __forceinline__ void x_q4_k_preloader(const void * __restrict_
     preloaded_data->v[0] = q4[0];
     preloaded_data->v[1] = q4[4];
 
-    const uint16_t * scales = (const uint16_t *)bq4_K->scales;
     uint16_t aux[2];
-    const int j = bq8_offset/2;
-    if (j < 2) {
-        aux[0] = scales[j+0] & 0x3f3f;
-        aux[1] = scales[j+2] & 0x3f3f;
-    } else {
-        aux[0] = ((scales[j+2] >> 0) & 0x0f0f) | ((scales[j-2] & 0xc0c0) >> 2);
-        aux[1] = ((scales[j+2] >> 4) & 0x0f0f) | ((scales[j-0] & 0xc0c0) >> 2);
+    {
+        const uint16_t * scales = (const uint16_t *)bq4_K->scales;
+        uint16_t scales_local[3];
+
+        const int j = bq8_offset/2;
+        scales_local[0] = scales[j+0];
+        scales_local[1] = scales[j+2];
+        scales_local[2] = j < 2 ? 0 : scales[j-2];
+
+        if (j < 2) {
+            aux[0] = scales_local[0] & 0x3f3f;
+            aux[1] = scales_local[1] & 0x3f3f;
+        } else {
+            aux[0] = ((scales_local[1] >> 0) & 0x0f0f) | ((scales_local[2] & 0xc0c0) >> 2);
+            aux[1] = ((scales_local[1] >> 4) & 0x0f0f) | ((scales_local[0] & 0xc0c0) >> 2);
+        }
     }
     const uint8_t * sc = (const uint8_t *)aux;
     const uint8_t * m  = sc + 2;
