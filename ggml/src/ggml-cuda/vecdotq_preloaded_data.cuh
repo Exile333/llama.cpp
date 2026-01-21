@@ -248,24 +248,41 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1_preloaded_data(const v
 // ============= Q4_K =============
 
 struct preloaded_data_q4_K_q8_1{
-    int v[2];           // Q4_K quantized data
-    int u[2*QR4_K];     // Q8_1 quantized data
-    float d8[QR4_K];    // Q8_1 scale factors
-    uint8_t sc[QR4_K];  // Q4_K scales
-    uint8_t m[QR4_K];   // Q4_K mins
-    ggml_half2 dm_q4_K; // Q4_K d and m values
+    int v[2];               // Q4_K quantized data
+    int u[2*QR4_K];         // Q8_1 quantized data
+    uint16_t q4_K_scm[3];   // Scales + mins, in 6 bits.
+    bool q4_K_scm_extended; // Check if one needs to use q4_K_scm[2].
+    ggml_half2 d8[QR4_K];   // Q8_1 scale factors
+    ggml_half2 dm_q4_K;     // Q4_K d and m values
 };
 
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1_preloaded_data(const void * __restrict__ preloaded_data_void) {
     const preloaded_data_q4_K_q8_1 * preloaded_data = (const preloaded_data_q4_K_q8_1 *) preloaded_data_void;
 
+    uint16_t aux[2];
+    if (!preloaded_data->q4_K_scm_extended) {
+        aux[0] = preloaded_data->q4_K_scm[0] & 0x3f3f;
+        aux[1] = preloaded_data->q4_K_scm[1] & 0x3f3f;
+    } else {
+        aux[0] = ((preloaded_data->q4_K_scm[1] >> 0) & 0x0f0f) | ((preloaded_data->q4_K_scm[2] & 0xc0c0) >> 2);
+        aux[1] = ((preloaded_data->q4_K_scm[1] >> 4) & 0x0f0f) | ((preloaded_data->q4_K_scm[0] & 0xc0c0) >> 2);
+    }
+    const uint8_t * sc = (const uint8_t *)aux;
+    const uint8_t * m  = sc + 2;
+
+    float d8_f[QR4_K];
+#pragma unroll
+    for (int i = 0; i < QR4_K; ++i) {
+        d8_f[i] = __low2float(preloaded_data->d8[i]);
+    }
+
     return vec_dot_q4_K_q8_1_impl_vmmq(
         preloaded_data->v,
         preloaded_data->u,
-        preloaded_data->sc,
-        preloaded_data->m,
+        sc,
+        m,
         preloaded_data->dm_q4_K,
-        preloaded_data->d8);
+        d8_f);
 }
 
 // ============= Q5_K =============

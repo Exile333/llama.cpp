@@ -197,7 +197,7 @@ static __device__ __forceinline__ void y_q4_k_preloader(const block_q8_1 * __res
 #pragma unroll
     for (int i = 0; i < QR4_K; ++i) {
         const block_q8_1 * bq8i = y + kby + bq8_offset + i;
-        preloaded_data->d8[i] = __low2float(bq8i->ds);
+        preloaded_data->d8[i] = bq8i->ds;
 
         const int * q8 = (const int *)bq8i->qs + ((kqs/2)%4);
         preloaded_data->u[2*i+0] = q8[0];
@@ -490,32 +490,19 @@ static __device__ __forceinline__ void x_q4_k_preloader(const void * __restrict_
     preloaded_data->v[0] = q4[0];
     preloaded_data->v[1] = q4[4];
 
-    uint16_t aux[2];
     {
         const uint16_t * scales = (const uint16_t *)bq4_K->scales;
-        uint16_t scales_local[3];
-
         const int j = bq8_offset/2;
-        scales_local[0] = scales[j+0];
-        scales_local[1] = scales[j+2];
-        scales_local[2] = j < 2 ? 0 : scales[j-2];
-
+        preloaded_data->q4_K_scm[0] = scales[j+0];
+        preloaded_data->q4_K_scm[1] = scales[j+2];
+        preloaded_data->q4_K_scm[2] = j < 2 ? 0 : scales[j-2];
         if (j < 2) {
-            aux[0] = scales_local[0] & 0x3f3f;
-            aux[1] = scales_local[1] & 0x3f3f;
+            preloaded_data->q4_K_scm_extended = false;
         } else {
-            aux[0] = ((scales_local[1] >> 0) & 0x0f0f) | ((scales_local[2] & 0xc0c0) >> 2);
-            aux[1] = ((scales_local[1] >> 4) & 0x0f0f) | ((scales_local[0] & 0xc0c0) >> 2);
+            preloaded_data->q4_K_scm_extended = true;
         }
     }
-    const uint8_t * sc = (const uint8_t *)aux;
-    const uint8_t * m  = sc + 2;
 
-#pragma unroll
-    for (int i = 0; i < QR4_K; ++i) {
-        preloaded_data->sc[i] = sc[i];
-        preloaded_data->m[i] = m[i];
-    }
     preloaded_data->dm_q4_K = bq4_K->dm;
 }
 
