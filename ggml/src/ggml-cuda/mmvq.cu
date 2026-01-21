@@ -193,9 +193,10 @@ static __device__ __forceinline__ void y_q3_k_preloader(const block_q8_1 * __res
 static __device__ __forceinline__ void y_q4_k_preloader(const block_q8_1 * __restrict__ y, uint8_t * __restrict__ result, const int& kby, const int& kqs) {
     preloaded_data_q4_K_q8_1 * preloaded_data = (preloaded_data_q4_K_q8_1 *) result;
 
+    const int bq8_offset = QR4_K * ((kqs/2) / (QI8_1/2));
 #pragma unroll
     for (int i = 0; i < QR4_K; ++i) {
-        const block_q8_1 * bq8i = y + kby + i;
+        const block_q8_1 * bq8i = y + kby + bq8_offset + i;
         preloaded_data->d8[i] = __low2float(bq8i->ds);
 
         const int * q8 = (const int *)bq8i->qs + ((kqs/2)%4);
