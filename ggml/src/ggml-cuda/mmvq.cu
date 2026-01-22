@@ -161,11 +161,11 @@ static __device__ __forceinline__ void y_q8_0_preloader(const block_q8_1 * __res
 static __device__ __forceinline__ void y_mxfp4_preloader(const block_q8_1 * __restrict__ y, uint8_t * __restrict__ result, const int& kby, const int& kqs) {
     preloaded_data_mxfp4_q8_1 * preloaded_data = (preloaded_data_mxfp4_q8_1 *) result;
 
-    preloaded_data->ds_q8_1 = y[kby].ds;
 #pragma unroll
     for (int i = 0; i < VDR_MXFP4_Q8_1_MMVQ + 4; ++i) {
         preloaded_data->u_q8_1[i] = get_int_b4(y[kby].qs, kqs + i);
     }
+    preloaded_data->ds_q8_1 = y[kby].ds;
 }
 
 static __device__ __forceinline__ void y_q2_k_preloader(const block_q8_1 * __restrict__ y, uint8_t * __restrict__ result, const int& kby, const int& kqs) {
@@ -442,11 +442,11 @@ static __device__ __forceinline__ void x_mxfp4_preloader(const void * __restrict
     preloaded_data_mxfp4_q8_1 * preloaded_data = (preloaded_data_mxfp4_q8_1 *) result;
     const block_mxfp4 * bq4 = (const block_mxfp4 *) vx + kbx;
 
-    preloaded_data->e_mxfp4 = bq4->e;
 #pragma unroll
     for (int l = 0; l < VDR_MXFP4_Q8_1_MMVQ; ++l) {
         preloaded_data->aux_q4[l] = get_int_b1(bq4->qs, kqs + l);
     }
+    preloaded_data->e_mxfp4 = bq4->e;
 }
 
 static __device__ __forceinline__ void x_q2_k_preloader(const void * __restrict__ vx, uint8_t * __restrict__ result, const int& kbx, const int& kqs) {
@@ -787,55 +787,19 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
     return 1;
 }
 
-// "result"'s type is 'float[rows_per_cuda_block]'.
-template <ggml_type type, int ncols_dst>
-static __device__ __forceinline__ void dot_product(
-    float* __restrict__ result,
-    const void * __restrict__ vx,
-    const block_q8_1 * __restrict__ y,
-    const int& blocks_per_row_x,
-    const int& stride_row_x,
-    const int& kbx_offset) {
-    constexpr mmvq_parameter_table_id table_id = get_device_table_id();
-    constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id);
-    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
-    constexpr int vdr = get_vdr_mmvq(type);
-    constexpr int nwarps = calc_nwarps(ncols_dst, table_id);
-    constexpr int qk  = ggml_cuda_type_traits<type>::qk;
-    constexpr int qr  = ggml_cuda_type_traits<type>::qr;
-    constexpr int qi  = ggml_cuda_type_traits<type>::qi;
-    constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
+/*
+struct __device__ TMMVQIterState {
+    int block_k;
+    int row_i;
+    int group_start_block_k;
+    int group_start_row_i;
+    const int blocks_cnt;
+    const int rows_cnt;
+};
 
-    constexpr x_preloader_t x_preloader = get_x_preloader(type);
-    constexpr y_preloader_t y_preloader = get_y_preloader(type);
-    constexpr int preloaded_data_size = get_preloaded_data_size(type);
-    constexpr vec_dot_q_cuda_preloaded_t vec_dot_q_cuda_preloaded = get_vec_dot_q_cuda_preloaded(type);
-
-    const int tid = warp_size*threadIdx.y + threadIdx.x;
-    const int kqs = vdr * (tid % (qi/vdr));
-
-    uint8_t preloaded_data[rows_per_cuda_block][preloaded_data_size];
-    int preload_row_i = 0;
-    int block_preload_idx = 0;
-    int block_process_idx = 0;
-    for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
-        // Preload first block.
-        const int kby = kbx * (qk/QK8_1);
-        y_preloader(y, preloaded_data[0], kby, kqs);
-        x_preloader(vx, preloaded_data[0], kbx_offset + kbx, kqs);
-#pragma unroll
-        for (int i = 1; i < rows_per_cuda_block; ++i) {
-            // Preload block #i.
-            y_preloader(y, preloaded_data[i], kby, kqs);
-            x_preloader(vx, preloaded_data[i], kbx_offset + i*stride_row_x + kbx, kqs);
-
-            // Compute block #{i-1}.
-            result[i-1] += vec_dot_q_cuda_preloaded(preloaded_data[i-1]);
-        }
-        // Compute last block.
-        result[rows_per_cuda_block-1] += vec_dot_q_cuda_preloaded(preloaded_data[rows_per_cuda_block-1]);
-    }
+static __device__ __forceinline__ bool mmvq_iterate(int& block_k, int& row_i, const int& rows_cnt, const int& blocks_cnt, const int& blocks_per_iter) {
 }
+*/
 
 template <ggml_type type, int ncols_dst>
 // tell the compiler to use as many registers as it wants, see nwarps definition below
@@ -848,15 +812,25 @@ static __global__ void mul_mat_vec_q(
         const uint32_t stride_sample_x, const uint32_t stride_sample_y, const uint32_t stride_sample_dst) {
 
     constexpr int qk  = ggml_cuda_type_traits<type>::qk;
+    constexpr int qr  = ggml_cuda_type_traits<type>::qr;
+    constexpr int qi  = ggml_cuda_type_traits<type>::qi;
+    constexpr int vdr = get_vdr_mmvq(type);
     constexpr int preloaded_data_size = get_preloaded_data_size(type);
+    constexpr x_preloader_t x_preloader = get_x_preloader(type);
+    constexpr y_preloader_t y_preloader = get_y_preloader(type);
     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
     constexpr int nwarps = calc_nwarps(ncols_dst, table_id);
     constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id);
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 
-    const int col_j = blockIdx.x % ncols_dst;
-    const int row0 = rows_per_cuda_block*(blockIdx.x / ncols_dst);
-    const int blocks_per_row_x = ncols_x / qk;
+    //constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
+    constexpr vec_dot_q_cuda_preloaded_t vec_dot_q_cuda_preloaded = get_vec_dot_q_cuda_preloaded(type);
+
+    const     int col_j = blockIdx.x % ncols_dst;
+    const     int tid = warp_size*threadIdx.y + threadIdx.x;
+    const     int row0 = rows_per_cuda_block*(blockIdx.x / ncols_dst);
+    const     int blocks_per_row_x = ncols_x / qk;
+    constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
 
     // The MUL_MAT_ID code path with ids != nullptr is only implemented for ncols_dst == 1.
     const uint32_t channel_dst = blockIdx.y;
@@ -873,7 +847,80 @@ static __global__ void mul_mat_vec_q(
     __shared__ float tmp_shared[rows_per_cuda_block][nwarps];
 
     // partial sum for each thread
-    dot_product<type, ncols_dst>(tmp_local, vx, y, blocks_per_row_x, stride_row_x, kbx_offset);
+    {
+        // Old version.
+        /*
+        const int kqs = vdr * (tid % (qi/vdr));
+        uint8_t preloaded_data[2][preloaded_data_size];
+        uint8_t row_by_block[2] = {0};
+        //bool phase_active = kbx < blocks_per_row_x;
+
+        int preload_kbx = tid / (qi/vdr);
+        if (preload_kbx < blocks_per_row_x) {
+            int preload_kby = preload_kbx * (qk/QK8_1);
+            int preload_row_i = 0;
+            int block_preload_idx = 0;
+            int block_process_idx = 0;
+
+            // Initial preload.
+            x_preloader(vx, preloaded_data[block_preload_idx], kbx_offset + preload_row_i*stride_row_x + preload_kbx, kqs);
+            y_preloader(y, preloaded_data[block_preload_idx], preload_kby, kqs);
+            row_by_block[block_preload_idx] = preload_row_i;
+            ++preload_row_i;
+            ++block_preload_idx;
+            if (preload_row_i >= rows_per_cuda_block) {
+                preload_row_i = 0;
+                preload_kbx += blocks_per_iter;
+                preload_kby = preload_kbx * (qk/QK8_1);
+            }
+
+            // Preload + process.
+            while (preload_kbx < blocks_per_row_x) {
+                // Load.
+                x_preloader(vx, preloaded_data[block_preload_idx], kbx_offset + preload_row_i*stride_row_x + preload_kbx, kqs);
+                y_preloader(y, preloaded_data[block_preload_idx], preload_kby, kqs);
+                row_by_block[block_preload_idx] = preload_row_i;
+                ++preload_row_i;
+                block_preload_idx = (block_preload_idx + 1) % 2;
+                if (preload_row_i >= rows_per_cuda_block) {
+                    preload_row_i = 0;
+                    preload_kbx += blocks_per_iter;
+                    preload_kby = preload_kbx * (qk/QK8_1);
+                }
+
+                // Process.
+                tmp_local[row_by_block[block_process_idx]] += vec_dot_q_cuda_preloaded(preloaded_data[block_process_idx]);
+                block_process_idx = (block_process_idx + 1) % 2;
+            }
+
+            // Process last block.
+            tmp_local[row_by_block[block_process_idx]] += vec_dot_q_cuda_preloaded(preloaded_data[block_process_idx]);
+        }
+        */
+
+        const int kqs = vdr * (tid % (qi/vdr));
+        uint8_t preloaded_data[rows_per_cuda_block][preloaded_data_size];
+        int preload_row_i = 0;
+        int block_preload_idx = 0;
+        int block_process_idx = 0;
+        for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+            // Preload first block.
+            const int kby = kbx * (qk/QK8_1);
+            y_preloader(y, preloaded_data[0], kby, kqs);
+            x_preloader(vx, preloaded_data[0], kbx_offset + kbx, kqs);
+#pragma unroll
+            for (int i = 1; i < rows_per_cuda_block; ++i) {
+                // Preload block #i.
+                y_preloader(y, preloaded_data[i], kby, kqs);
+                x_preloader(vx, preloaded_data[i], kbx_offset + i*stride_row_x + kbx, kqs);
+
+                // Compute block #{i-1}.
+                tmp_local[i-1] += vec_dot_q_cuda_preloaded(preloaded_data[i-1]);
+            }
+            // Compute last block.
+            tmp_local[rows_per_cuda_block-1] += vec_dot_q_cuda_preloaded(preloaded_data[rows_per_cuda_block-1]);
+        }
+    }
 
 #pragma unroll
     for (int i = 0; i < rows_per_cuda_block; ++i) {
