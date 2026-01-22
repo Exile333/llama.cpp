@@ -816,29 +816,32 @@ static __device__ __forceinline__ void dot_product_iter(
     const int kqs = vdr * (tid % (qi/vdr));
 
     uint8_t preloaded_data[blocks_cnt][rows_per_cuda_block][preloaded_data_size];
-    int preload_row_i = 0;
-    int block_preload_idx = 0;
-    int block_process_idx = 0;
-#pragma unroll
-    for (int block_idx = 0; block_idx < blocks_cnt; ++block_idx) {
-    //for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
-        // Preload first block.
-        const int kbx = first_block + block_idx*blocks_per_iter_per_threadblock;
-        const int kby = kbx * (qk/QK8_1);
-        y_preloader(y, preloaded_data[block_idx][0], kby, kqs);
-        x_preloader(vx, preloaded_data[block_idx][0], kbx_offset + kbx, kqs);
-#pragma unroll
-        for (int i = 1; i < rows_per_cuda_block; ++i) {
-            // Preload block #i.
-            y_preloader(y, preloaded_data[block_idx][i], kby, kqs);
-            x_preloader(vx, preloaded_data[block_idx][i], kbx_offset + i*stride_row_x + kbx, kqs);
 
-            // Compute block #{i-1}.
-            result[i-1] += vec_dot_q_cuda_preloaded(preloaded_data[block_idx][i-1]);
-        }
-        // Compute last block.
-        result[rows_per_cuda_block-1] += vec_dot_q_cuda_preloaded(preloaded_data[block_idx][rows_per_cuda_block-1]);
+    // Preload first block.
+    int kbx = first_block;
+    int kby = kbx * (qk/QK8_1);
+    y_preloader(y, preloaded_data[0][0], kby, kqs);
+    x_preloader(vx, preloaded_data[0][0], kbx_offset + kbx, kqs);
+
+#pragma unroll
+    for (int block_row_idx = 1; block_row_idx < blocks_cnt*rows_per_cuda_block; ++block_row_idx) {
+        const int row_idx = block_row_idx % rows_per_cuda_block;
+        const int block_idx = block_row_idx / rows_per_cuda_block;
+        kbx = first_block + block_idx*blocks_per_iter_per_threadblock;
+        kby = kbx * (qk/QK8_1);
+
+        // Preload block #{block_row_idx}.
+        y_preloader(y, preloaded_data[block_idx][row_idx], kby, kqs);
+        x_preloader(vx, preloaded_data[block_idx][row_idx], kbx_offset + row_idx*stride_row_x + kbx, kqs);
+
+        // Compute block #{block_row_idx-1}.
+        const int prev_row_idx = (block_row_idx - 1) % rows_per_cuda_block;
+        const int prev_block_idx = (block_row_idx - 1) / rows_per_cuda_block;
+        result[prev_row_idx] += vec_dot_q_cuda_preloaded(preloaded_data[prev_block_idx][prev_row_idx]);
     }
+
+    // Compute last block.
+    result[rows_per_cuda_block-1] += vec_dot_q_cuda_preloaded(preloaded_data[blocks_cnt-1][rows_per_cuda_block-1]);
 }
 
 // "result"'s type is 'float[rows_per_cuda_block]'.
