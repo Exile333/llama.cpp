@@ -787,15 +787,16 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
     return 1;
 }
 
-// "result"'s type is 'float[rows_per_cuda_block]'.
-template <ggml_type type, int ncols_dst>
-static __device__ __forceinline__ void dot_product(
+template <ggml_type type, int ncols_dst, int blocks_cnt>
+static __device__ __forceinline__ void dot_product_iter(
     float* __restrict__ result,
     const void * __restrict__ vx,
     const block_q8_1 * __restrict__ y,
     const int& blocks_per_row_x,
     const int& stride_row_x,
-    const int& kbx_offset) {
+    const int& kbx_offset,
+    const int& first_block,
+    const int& blocks_per_iter_per_threadblock) {
     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
     constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id);
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
@@ -814,26 +815,77 @@ static __device__ __forceinline__ void dot_product(
     const int tid = warp_size*threadIdx.y + threadIdx.x;
     const int kqs = vdr * (tid % (qi/vdr));
 
-    uint8_t preloaded_data[rows_per_cuda_block][preloaded_data_size];
+    uint8_t preloaded_data[blocks_cnt][rows_per_cuda_block][preloaded_data_size];
     int preload_row_i = 0;
     int block_preload_idx = 0;
     int block_process_idx = 0;
-    for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+#pragma unroll
+    for (int block_idx = 0; block_idx < blocks_cnt; ++block_idx) {
+    //for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
         // Preload first block.
+        const int kbx = first_block + block_idx*blocks_per_iter_per_threadblock;
         const int kby = kbx * (qk/QK8_1);
-        y_preloader(y, preloaded_data[0], kby, kqs);
-        x_preloader(vx, preloaded_data[0], kbx_offset + kbx, kqs);
+        y_preloader(y, preloaded_data[block_idx][0], kby, kqs);
+        x_preloader(vx, preloaded_data[block_idx][0], kbx_offset + kbx, kqs);
 #pragma unroll
         for (int i = 1; i < rows_per_cuda_block; ++i) {
             // Preload block #i.
-            y_preloader(y, preloaded_data[i], kby, kqs);
-            x_preloader(vx, preloaded_data[i], kbx_offset + i*stride_row_x + kbx, kqs);
+            y_preloader(y, preloaded_data[block_idx][i], kby, kqs);
+            x_preloader(vx, preloaded_data[block_idx][i], kbx_offset + i*stride_row_x + kbx, kqs);
 
             // Compute block #{i-1}.
-            result[i-1] += vec_dot_q_cuda_preloaded(preloaded_data[i-1]);
+            result[i-1] += vec_dot_q_cuda_preloaded(preloaded_data[block_idx][i-1]);
         }
         // Compute last block.
-        result[rows_per_cuda_block-1] += vec_dot_q_cuda_preloaded(preloaded_data[rows_per_cuda_block-1]);
+        result[rows_per_cuda_block-1] += vec_dot_q_cuda_preloaded(preloaded_data[block_idx][rows_per_cuda_block-1]);
+    }
+}
+
+// "result"'s type is 'float[rows_per_cuda_block]'.
+template <ggml_type type, int ncols_dst>
+static __device__ __forceinline__ void dot_product(
+    float* __restrict__ result,
+    const void * __restrict__ vx,
+    const block_q8_1 * __restrict__ y,
+    const int& blocks_per_row_x,
+    const int& stride_row_x,
+    const int& kbx_offset) {
+    constexpr mmvq_parameter_table_id table_id = get_device_table_id();
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+    constexpr int vdr = get_vdr_mmvq(type);
+    constexpr int qi  = ggml_cuda_type_traits<type>::qi;
+    constexpr int nwarps = calc_nwarps(ncols_dst, table_id);
+    constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
+
+    const int tid = warp_size*threadIdx.y + threadIdx.x;
+
+    int block_start = tid / (qi/vdr);
+    //int blocks_to_process = (blocks_per_row_x - block_start) / blocks_per_iter;
+    int blocks_to_process = CEIL(blocks_per_row_x - block_start, blocks_per_iter);
+
+    while (blocks_to_process > 3) {
+        constexpr const int blocks_to_fuse = 4;
+        dot_product_iter<type, ncols_dst, blocks_to_fuse>(result, vx, y, blocks_per_row_x, stride_row_x, kbx_offset, block_start, blocks_per_iter);
+        block_start += blocks_to_fuse*blocks_per_iter;
+        blocks_to_process -= blocks_to_fuse;
+    }
+    while (blocks_to_process > 2) {
+        constexpr const int blocks_to_fuse = 3;
+        dot_product_iter<type, ncols_dst, blocks_to_fuse>(result, vx, y, blocks_per_row_x, stride_row_x, kbx_offset, block_start, blocks_per_iter);
+        block_start += blocks_to_fuse*blocks_per_iter;
+        blocks_to_process -= blocks_to_fuse;
+    }
+    while (blocks_to_process > 1) {
+        constexpr const int blocks_to_fuse = 2;
+        dot_product_iter<type, ncols_dst, blocks_to_fuse>(result, vx, y, blocks_per_row_x, stride_row_x, kbx_offset, block_start, blocks_per_iter);
+        block_start += blocks_to_fuse*blocks_per_iter;
+        blocks_to_process -= blocks_to_fuse;
+    }
+    while (blocks_to_process > 0) {
+        constexpr const int blocks_to_fuse = 1;
+        dot_product_iter<type, ncols_dst, blocks_to_fuse>(result, vx, y, blocks_per_row_x, stride_row_x, kbx_offset, block_start, blocks_per_iter);
+        block_start += blocks_to_fuse*blocks_per_iter;
+        blocks_to_process -= blocks_to_fuse;
     }
 }
 
