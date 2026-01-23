@@ -1,8 +1,5 @@
 #pragma once
 
-// This file contains preloaded data structures and functions for vecdot operations
-// Include this file in vecdotq.cuh to add preloaded data support for all quantization types
-
 // ============= Q4_1 =============
 
 template <int vdr> static __device__ __forceinline__ float vec_dot_q4_1_q8_1_impl_preloaded_data(
