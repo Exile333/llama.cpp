@@ -77,8 +77,9 @@ static __device__ __forceinline__ void y_mxfp4_preloader(const block_q8_1 * __re
     preloaded_data_mxfp4_q8_1 * preloaded_data = (preloaded_data_mxfp4_q8_1 *) result;
 
 #pragma unroll
-    for (int i = 0; i < VDR_MXFP4_Q8_1_MMVQ + 4; ++i) {
-        preloaded_data->u_q8_1[i] = get_int_b4(y[kby].qs, kqs + i);
+    for (int i = 0; i < VDR_MXFP4_Q8_1_MMVQ; ++i) {
+        preloaded_data->u_q8_1[i*2 + 0] = get_int_b4(y[kby].qs, kqs + i);
+        preloaded_data->u_q8_1[i*2 + 1] = get_int_b4(y[kby].qs, kqs + i + 4);
     }
     preloaded_data->ds_q8_1 = y[kby].ds;
 }
