@@ -327,13 +327,23 @@ static void mul_mat_vec_q_switch_fusion(
 
     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
     if constexpr (c_ncols_dst == 1) {
+        const bool has_ids = ids != nullptr;
+        // TODO Try to improve single column kernel, so MoE cases (has_ids == true, MUL_MAT_MAT_ID op) are also fast enough.
         if (has_fusion) {
-            mul_mat_vec_q_single_column<type, c_ncols_dst, true, is_multi_token_id><<<block_nums, block_dims, nbytes_shared, stream>>>
-                (vx, vy, ids, fusion, dst, ncols_x, nchannels_y, stride_row_x, stride_col_y, stride_col_dst,
-                 channel_ratio, stride_channel_x, stride_channel_y, stride_channel_dst,
-                 sample_ratio, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride);
-            return;
-        } else {
+            if (has_ids) {
+                mul_mat_vec_q<type, c_ncols_dst, true, is_multi_token_id><<<block_nums, block_dims, nbytes_shared, stream>>>
+                    (vx, vy, ids, fusion, dst, ncols_x, nchannels_y, stride_row_x, stride_col_y, stride_col_dst,
+                     channel_ratio, stride_channel_x, stride_channel_y, stride_channel_dst,
+                     sample_ratio, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride);
+                return;
+            } else {
+                mul_mat_vec_q_single_column<type, c_ncols_dst, true, is_multi_token_id><<<block_nums, block_dims, nbytes_shared, stream>>>
+                    (vx, vy, ids, fusion, dst, ncols_x, nchannels_y, stride_row_x, stride_col_y, stride_col_dst,
+                     channel_ratio, stride_channel_x, stride_channel_y, stride_channel_dst,
+                     sample_ratio, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride);
+                return;
+            }
+        } else if (!has_ids) {
             mul_mat_vec_q_single_column<type, c_ncols_dst, false, is_multi_token_id><<<block_nums, block_dims, nbytes_shared, stream>>>
                 (vx, vy, ids, fusion, dst, ncols_x, nchannels_y, stride_row_x, stride_col_y, stride_col_dst,
                  channel_ratio, stride_channel_x, stride_channel_y, stride_channel_dst,
@@ -388,7 +398,13 @@ static void mul_mat_vec_q_switch_ncols_dst(
     switch (ncols_dst) {
         case 1: {
             constexpr int c_ncols_dst = 1;
-            std::pair<dim3, dim3> dims = calc_launch_params_single_column(c_ncols_dst, nrows_x, nchannels_dst, nsamples_dst, warp_size, table_id);
+            std::pair<dim3, dim3> dims;
+            // TODO More clear params resolve.
+            if (has_ids) {
+                dims = calc_launch_params(c_ncols_dst, nrows_x, nchannels_dst, nsamples_dst, warp_size, table_id);
+            } else {
+                dims = calc_launch_params_single_column(c_ncols_dst, nrows_x, nchannels_dst, nsamples_dst, warp_size, table_id);
+            }
             mul_mat_vec_q_switch_fusion<type, c_ncols_dst>(vx, vy, ids, fusion, dst, ncols_x, nchannels_y_fd, stride_row_x, stride_col_y, stride_col_dst,
                  channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
                  sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
