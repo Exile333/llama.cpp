@@ -163,7 +163,7 @@ constexpr __host__ __device__ int calc_rows_per_block_single_column(int ncols_ds
     } else if (table_id == MMVQ_PARAMETERS_RDNA2_PLUS) {
         switch (ncols_dst) {
             case 1:
-                return 4;
+                return 1;
             case 2:
                 return 8;
             case 3:
@@ -211,6 +211,8 @@ __global__ void mul_mat_vec_q_single_column(
     constexpr int preloaded_data_size = get_preloaded_data_size(type);
     constexpr x_preloader_t x_preloader = get_x_preloader(type);
     constexpr y_preloader_t y_preloader = get_y_preloader(type);
+
+    static_assert(rows_per_cuda_block == 1, "More rows may cause an out-of-bounds access.");
 
     constexpr vec_dot_q_cuda_preloaded_t vec_dot_q_cuda_preloaded = get_vec_dot_q_cuda_preloaded(type);
 
