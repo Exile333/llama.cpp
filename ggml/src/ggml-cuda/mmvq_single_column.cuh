@@ -8,6 +8,7 @@
 
 #define MMVQ_CEIL(a,b) ((a + b - 1) / b)
 
+// TODO Test on some NVidia GPUs, see if this kernel must be limited to AMD hardware only.
 typedef float (*vec_dot_q_cuda_preloaded_t)(const void * __restrict__ preloaded_data_void);
 
 static constexpr __device__ vec_dot_q_cuda_preloaded_t get_vec_dot_q_cuda_preloaded(ggml_type type) {

@@ -328,7 +328,8 @@ static void mul_mat_vec_q_switch_fusion(
     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
     if constexpr (c_ncols_dst == 1) {
         const bool has_ids = ids != nullptr;
-        // TODO Try to improve single column kernel, so MoE cases (has_ids == true, MUL_MAT_MAT_ID op) are also fast enough.
+        // TODO Try to improve single column kernel, so MoE cases (has_ids == true, MUL_MAT_ID op) are also fast enough.
+        // TODO Some runs fail "./build/bin/test-backend-ops perf -o MUL_MAT_ID -p type_a=q4_0" due to bad routing. Fix it.
         if (has_fusion) {
             if (has_ids) {
                 mul_mat_vec_q<type, c_ncols_dst, true, is_multi_token_id><<<block_nums, block_dims, nbytes_shared, stream>>>
