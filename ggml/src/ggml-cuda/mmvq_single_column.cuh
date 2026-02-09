@@ -1,98 +1,12 @@
 #pragma once
 
 #include "mmvq.cuh"
-#include "mmvq_preload_data.cuh"
 #include "quantize.cuh"
 #include "unary.cuh"
-#include "vecdotq_preloaded_data.cuh"
 
 #define MMVQ_CEIL(a,b) ((a + b - 1) / b)
 
 // TODO Test on some NVidia GPUs, see if this kernel must be limited to AMD hardware only.
-typedef float (*vec_dot_q_cuda_preloaded_t)(const void * __restrict__ preloaded_data_void);
-
-static constexpr __device__ vec_dot_q_cuda_preloaded_t get_vec_dot_q_cuda_preloaded(ggml_type type) {
-    switch (type) {
-        case GGML_TYPE_Q4_0:    return vec_dot_q4_0_q8_1_preloaded_data;
-        case GGML_TYPE_Q4_1:    return vec_dot_q4_1_q8_1_preloaded_data;
-        case GGML_TYPE_Q5_0:    return vec_dot_q5_0_q8_1_preloaded_data;
-        case GGML_TYPE_Q5_1:    return vec_dot_q5_1_q8_1_preloaded_data;
-        case GGML_TYPE_Q8_0:    return vec_dot_q8_0_q8_1_preloaded_data;
-        case GGML_TYPE_MXFP4:   return vec_dot_mxfp4_q8_1_preloaded_data;
-        case GGML_TYPE_Q2_K:    return vec_dot_q2_K_q8_1_preloaded_data;
-        case GGML_TYPE_Q3_K:    return vec_dot_q3_K_q8_1_preloaded_data;
-        case GGML_TYPE_Q4_K:    return vec_dot_q4_K_q8_1_preloaded_data;
-        case GGML_TYPE_Q5_K:    return vec_dot_q5_K_q8_1_preloaded_data;
-        case GGML_TYPE_Q6_K:    return vec_dot_q6_K_q8_1_preloaded_data;
-        case GGML_TYPE_IQ2_XXS: return vec_dot_iq2_xxs_q8_1_preloaded_data;
-        case GGML_TYPE_IQ2_XS:  return vec_dot_iq2_xs_q8_1_preloaded_data;
-        case GGML_TYPE_IQ2_S:   return vec_dot_iq2_s_q8_1_preloaded_data;
-        case GGML_TYPE_IQ3_XXS: return vec_dot_iq3_xxs_q8_1_preloaded_data;
-        case GGML_TYPE_IQ3_S:   return vec_dot_iq3_s_q8_1_preloaded_data;
-        case GGML_TYPE_IQ1_S:   return vec_dot_iq1_s_q8_1_preloaded_data;
-        case GGML_TYPE_IQ1_M:   return vec_dot_iq1_m_q8_1_preloaded_data;
-        case GGML_TYPE_IQ4_NL:  return vec_dot_iq4_nl_q8_1_preloaded_data;
-        case GGML_TYPE_IQ4_XS:  return vec_dot_iq4_xs_q8_1_preloaded_data;
-        default:                return nullptr;
-    }
-}
-
-typedef void (*x_preloader_t)(const void * __restrict__ vx, uint8_t * __restrict__ result, const int& kbx, const int& kqs);
-
-static constexpr __device__ x_preloader_t get_x_preloader(ggml_type type) {
-    switch (type) {
-        case GGML_TYPE_Q4_0:    return x_q4_0_preloader;
-        case GGML_TYPE_Q4_1:    return x_q4_1_preloader;
-        case GGML_TYPE_Q5_0:    return x_q5_0_preloader;
-        case GGML_TYPE_Q5_1:    return x_q5_1_preloader;
-        case GGML_TYPE_Q8_0:    return x_q8_0_preloader;
-        case GGML_TYPE_MXFP4:   return x_mxfp4_preloader;
-        case GGML_TYPE_Q2_K:    return x_q2_K_preloader;
-        case GGML_TYPE_Q3_K:    return x_q3_K_preloader;
-        case GGML_TYPE_Q4_K:    return x_q4_K_preloader;
-        case GGML_TYPE_Q5_K:    return x_q5_K_preloader;
-        case GGML_TYPE_Q6_K:    return x_q6_K_preloader;
-        case GGML_TYPE_IQ2_XXS: return x_iq2_xxs_preloader;
-        case GGML_TYPE_IQ2_XS:  return x_iq2_xs_preloader;
-        case GGML_TYPE_IQ2_S:   return x_iq2_s_preloader;
-        case GGML_TYPE_IQ3_XXS: return x_iq3_xxs_preloader;
-        case GGML_TYPE_IQ3_S:   return x_iq3_s_preloader;
-        case GGML_TYPE_IQ1_S:   return x_iq1_s_preloader;
-        case GGML_TYPE_IQ1_M:   return x_iq1_m_preloader;
-        case GGML_TYPE_IQ4_NL:  return x_iq4_nl_preloader;
-        case GGML_TYPE_IQ4_XS:  return x_iq4_xs_preloader;
-        default:                return nullptr;
-    }
-}
-
-typedef void (*y_preloader_t)(const block_q8_1 * __restrict__ y, uint8_t * __restrict__ result, const int& kby, const int& kqs);
-
-static constexpr __device__ y_preloader_t get_y_preloader(ggml_type type) {
-    switch (type) {
-        case GGML_TYPE_Q4_0:    return y_q4_0_preloader;
-        case GGML_TYPE_Q4_1:    return y_q4_1_preloader;
-        case GGML_TYPE_Q5_0:    return y_q5_0_preloader;
-        case GGML_TYPE_Q5_1:    return y_q5_1_preloader;
-        case GGML_TYPE_Q8_0:    return y_q8_0_preloader;
-        case GGML_TYPE_MXFP4:   return y_mxfp4_preloader;
-        case GGML_TYPE_Q2_K:    return y_q2_K_preloader;
-        case GGML_TYPE_Q3_K:    return y_q3_K_preloader;
-        case GGML_TYPE_Q4_K:    return y_q4_K_preloader;
-        case GGML_TYPE_Q5_K:    return y_q5_K_preloader;
-        case GGML_TYPE_Q6_K:    return y_q6_K_preloader;
-        case GGML_TYPE_IQ2_XXS: return y_iq2_xxs_preloader;
-        case GGML_TYPE_IQ2_XS:  return y_iq2_xs_preloader;
-        case GGML_TYPE_IQ2_S:   return y_iq2_s_preloader;
-        case GGML_TYPE_IQ3_XXS: return y_iq3_xxs_preloader;
-        case GGML_TYPE_IQ3_S:   return y_iq3_s_preloader;
-        case GGML_TYPE_IQ1_S:   return y_iq1_s_preloader;
-        case GGML_TYPE_IQ1_M:   return y_iq1_m_preloader;
-        case GGML_TYPE_IQ4_NL:  return y_iq4_nl_preloader;
-        case GGML_TYPE_IQ4_XS:  return y_iq4_xs_preloader;
-        default:                return nullptr;
-    }
-}
-
 static constexpr __host__ __device__ int calc_nwarps_single_column(int ncols_dst, mmvq_parameter_table_id table_id) {
     if (table_id == MMVQ_PARAMETERS_GENERIC) {
         switch (ncols_dst) {
@@ -208,13 +122,10 @@ __global__ void mul_mat_vec_q_single_column(
     constexpr int nwarps = calc_nwarps_single_column(ncols_dst, table_id);
     constexpr int rows_per_cuda_block = calc_rows_per_block_single_column(ncols_dst, table_id);
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
-    constexpr int preloaded_data_size = get_preloaded_data_size(type);
-    constexpr x_preloader_t x_preloader = get_x_preloader(type);
-    constexpr y_preloader_t y_preloader = get_y_preloader(type);
 
     static_assert(rows_per_cuda_block == 1, "More rows may cause an out-of-bounds access.");
 
-    constexpr vec_dot_q_cuda_preloaded_t vec_dot_q_cuda_preloaded = get_vec_dot_q_cuda_preloaded(type);
+    constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
 
     const     int col_j = blockIdx.x % ncols_dst;
     const     int tid = warp_size*threadIdx.y + threadIdx.x;
@@ -300,46 +211,15 @@ __global__ void mul_mat_vec_q_single_column(
         // x block quant index when casting the quants to int
         const int kqs = vdr * (tid % (qi/vdr));
 
-        uint8_t preloaded_data[rows_per_cuda_block][preloaded_data_size];
-        uint8_t preloaded_data_gate[rows_per_cuda_block][preloaded_data_size];
-
-        // Preload first block.
-        x_preloader(vx, preloaded_data[0], kbx_offset + kbx, kqs);
-        y_preloader(y, preloaded_data[0], kby, kqs);
-        if constexpr (has_fusion) {
-            if (use_gate) {
-                x_preloader(vgate, preloaded_data_gate[0], kbx_offset + kbx, kqs);
-                y_preloader(y, preloaded_data_gate[0], kby, kqs);
-            }
-        }
-
 #pragma unroll
-        for (int i = 1; i < rows_per_cuda_block; ++i) {
-            // Preload block #i.
-            x_preloader(vx, preloaded_data[i], kbx_offset + i*stride_row_x + kbx, kqs);
-            y_preloader(y, preloaded_data[i], kby, kqs);
+        for (int i = 0; i < rows_per_cuda_block; ++i) {
+            tmp[i] += vec_dot_q_cuda(
+                vx, &y[kby], kbx_offset + i*stride_row_x + kbx, kqs);
             if constexpr (has_fusion) {
                 if (use_gate) {
-                    x_preloader(vgate, preloaded_data_gate[i], kbx_offset + i*stride_row_x + kbx, kqs);
-                    y_preloader(y, preloaded_data_gate[i], kby, kqs);
+                    tmp_gate[i] += vec_dot_q_cuda(
+                        vgate, &y[kby], kbx_offset + i*stride_row_x + kbx, kqs);
                 }
-            }
-
-            // Compute block #{i-1}.
-            tmp[i-1] += vec_dot_q_cuda_preloaded(preloaded_data[i-1]);
-
-            if constexpr (has_fusion) {
-                if (use_gate) {
-                    tmp_gate[i-1] += vec_dot_q_cuda_preloaded(preloaded_data_gate[i-1]);
-                }
-            }
-        }
-
-        // Compute last block.
-        tmp[rows_per_cuda_block-1] += vec_dot_q_cuda_preloaded(preloaded_data[rows_per_cuda_block-1]);
-        if constexpr (has_fusion) {
-            if (use_gate) {
-                tmp_gate[rows_per_cuda_block-1] += vec_dot_q_cuda_preloaded(preloaded_data_gate[rows_per_cuda_block-1]);
             }
         }
     }
