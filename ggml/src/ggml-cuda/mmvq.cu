@@ -303,7 +303,6 @@ static void mul_mat_vec_q_switch_fusion(
     if constexpr (c_ncols_dst == 1) {
         const bool has_ids = ids != nullptr;
         // TODO Try to improve single column kernel, so MoE cases (has_ids == true, MUL_MAT_ID op) are also fast enough.
-        // TODO Some runs fail "./build/bin/test-backend-ops perf -o MUL_MAT_ID -p type_a=q4_0" due to bad routing. Fix it.
         if (has_fusion) {
             if (has_ids) {
                 mul_mat_vec_q<type, c_ncols_dst, true, is_multi_token_id><<<block_nums, block_dims, nbytes_shared, stream>>>
@@ -362,7 +361,7 @@ static void mul_mat_vec_q_switch_ncols_dst(
     if (has_ids && ncols_dst > 1) {
         // Multi-token MUL_MAT_ID path only - single-token goes through regular path below
         constexpr int c_ncols_dst = 1;
-        std::pair<dim3, dim3> dims = calc_launch_params_single_column(c_ncols_dst, nrows_x, nchannels_dst, ncols_dst, warp_size, table_id);
+        std::pair<dim3, dim3> dims = calc_launch_params(c_ncols_dst, nrows_x, nchannels_dst, ncols_dst, warp_size, table_id);
         mul_mat_vec_q_switch_fusion<type, c_ncols_dst, true>(vx, vy, ids, fusion, dst, ncols_x, nchannels_y_fd, stride_row_x, stride_col_y, stride_col_dst,
              channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
              sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
